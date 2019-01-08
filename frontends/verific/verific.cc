@@ -52,9 +52,9 @@ USING_YOSYS_NAMESPACE
 #pragma clang diagnostic pop
 #endif
 
-#ifdef VERIFIC_NAMESPACE
+//#ifdef VERIFIC_NAMESPACE
 using namespace Verific;
-#endif
+//#endif
 
 #endif
 
