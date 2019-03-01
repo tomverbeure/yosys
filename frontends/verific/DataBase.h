@@ -133,12 +133,12 @@ namespace Verific {
 
     class Array {
         public:
-        void InsertLast(VhdlLibrary *);
-        void InsertLast(VhdlDesignUnit *);
-        void InsertLast(VeriLibrary *);
-        void InsertLast(VeriModule *);
-        void InsertLast(const char *);
-        void Insert(const char *);
+        void InsertLast(VhdlLibrary *) { };
+        void InsertLast(VhdlDesignUnit *) { };
+        void InsertLast(VeriLibrary *) { };
+        void InsertLast(VeriModule *) { };
+        void InsertLast(const char *) { };
+        void Insert(const char *) { };
     };
 
     class MapIter {

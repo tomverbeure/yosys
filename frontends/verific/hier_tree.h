@@ -6,8 +6,8 @@
 
 namespace hier_tree {
 
-    Verific::Array * ElaborateAll(Verific::Array *, Verific::Array *);
-    Verific::Array * Elaborate(Verific::Array *, Verific::Array *);
+    Verific::Array * ElaborateAll(Verific::Array *, Verific::Array *) { return nullptr; };
+    Verific::Array * Elaborate(Verific::Array *, Verific::Array *) { return nullptr; };
 
 }
 
