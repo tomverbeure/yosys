@@ -296,9 +296,9 @@ struct EquivStructPass : public Pass {
 		log("command will also de-duplicate gates.\n");
 		log("\n");
 		log("    -fwd\n");
-		log("        by default this command performans forward sweeps until nothing can\n");
-		log("        be merged by forwards sweeps, then backward sweeps until forward\n");
-		log("        sweeps are effective again. with this option set only forward sweeps\n");
+		log("        by default, this command performs forward sweeps until nothing can\n");
+		log("        be merged by forward sweeps, then backward sweeps until forward\n");
+		log("        sweeps are effective again. With this option set, only forward sweeps\n");
 		log("        are performed.\n");
 		log("\n");
 		log("    -fwonly <cell_type>\n");
@@ -307,7 +307,7 @@ struct EquivStructPass : public Pass {
 		log("        this list automatically.\n");
 		log("\n");
 		log("    -icells\n");
-		log("        by default, the internal RTL and gate cell types are ignored. add\n");
+		log("        by default, the internal RTL and gate cell types are ignored. Add\n");
 		log("        this option to also process those cell types with this command.\n");
 		log("\n");
 		log("    -maxiter <N>\n");
