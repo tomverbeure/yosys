@@ -85,6 +85,8 @@ struct CellTypes
 		setup_internals_eval();
 
 		IdString A = "\\A", B = "\\B", EN = "\\EN", Y = "\\Y";
+		IdString SRC = "\\SRC", DST = "\\DST", DAT = "\\DAT";
+		IdString EN_SRC = "\\EN_SRC", EN_DST = "\\EN_DST";
 
 		setup_type("$tribuf", {A, EN}, {Y}, true);
 
@@ -99,6 +101,9 @@ struct CellTypes
 		setup_type("$allconst", pool<RTLIL::IdString>(), {Y}, true);
 		setup_type("$allseq", pool<RTLIL::IdString>(), {Y}, true);
 		setup_type("$equiv", {A, B}, {Y}, true);
+		setup_type("$specify2", {EN, SRC, DST}, pool<RTLIL::IdString>(), true);
+		setup_type("$specify3", {EN, SRC, DST, DAT}, pool<RTLIL::IdString>(), true);
+		setup_type("$specrule", {EN_SRC, EN_DST, SRC, DST}, pool<RTLIL::IdString>(), true);
 	}
 
 	void setup_internals_eval()
@@ -241,24 +246,24 @@ struct CellTypes
 		cell_types.clear();
 	}
 
-	bool cell_known(RTLIL::IdString type)
+	bool cell_known(RTLIL::IdString type) const
 	{
 		return cell_types.count(type) != 0;
 	}
 
-	bool cell_output(RTLIL::IdString type, RTLIL::IdString port)
+	bool cell_output(RTLIL::IdString type, RTLIL::IdString port) const
 	{
 		auto it = cell_types.find(type);
 		return it != cell_types.end() && it->second.outputs.count(port) != 0;
 	}
 
-	bool cell_input(RTLIL::IdString type, RTLIL::IdString port)
+	bool cell_input(RTLIL::IdString type, RTLIL::IdString port) const
 	{
 		auto it = cell_types.find(type);
 		return it != cell_types.end() && it->second.inputs.count(port) != 0;
 	}
 
-	bool cell_evaluable(RTLIL::IdString type)
+	bool cell_evaluable(RTLIL::IdString type) const
 	{
 		auto it = cell_types.find(type);
 		return it != cell_types.end() && it->second.is_evaluable;
@@ -464,7 +469,7 @@ struct CellTypes
 		if (cell->type == "$_AOI4_")
 			return eval_not(const_or(const_and(arg1, arg2, false, false, 1), const_and(arg3, arg4, false, false, 1), false, false, 1));
 		if (cell->type == "$_OAI4_")
-			return eval_not(const_and(const_or(arg1, arg2, false, false, 1), const_and(arg3, arg4, false, false, 1), false, false, 1));
+			return eval_not(const_and(const_or(arg1, arg2, false, false, 1), const_or(arg3, arg4, false, false, 1), false, false, 1));
 
 		log_assert(arg4.bits.size() == 0);
 		return eval(cell, arg1, arg2, arg3, errp);
@@ -477,4 +482,3 @@ extern CellTypes yosys_celltypes;
 YOSYS_NAMESPACE_END
 
 #endif
-

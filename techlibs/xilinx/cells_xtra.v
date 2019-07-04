@@ -30,29 +30,6 @@ module BUFGCE_1 (...);
     input CE, I;
 endmodule
 
-module BUFGCTRL (...);
-    output O;
-    input CE0;
-    input CE1;
-    input I0;
-    input I1;
-    input IGNORE0;
-    input IGNORE1;
-    input S0;
-    input S1;
-    parameter integer INIT_OUT = 0;
-    parameter PRESELECT_I0 = "FALSE";
-    parameter PRESELECT_I1 = "FALSE";
-    parameter [0:0] IS_CE0_INVERTED = 1'b0;
-    parameter [0:0] IS_CE1_INVERTED = 1'b0;
-    parameter [0:0] IS_I0_INVERTED = 1'b0;
-    parameter [0:0] IS_I1_INVERTED = 1'b0;
-    parameter [0:0] IS_IGNORE0_INVERTED = 1'b0;
-    parameter [0:0] IS_IGNORE1_INVERTED = 1'b0;
-    parameter [0:0] IS_S0_INVERTED = 1'b0;
-    parameter [0:0] IS_S1_INVERTED = 1'b0;
-endmodule
-
 module BUFGMUX (...);
     parameter CLK_SEL_TYPE = "SYNC";
     output O;
@@ -74,15 +51,6 @@ endmodule
 
 module BUFH (...);
     output O;
-    input I;
-endmodule
-
-module BUFHCE (...);
-    parameter CE_TYPE = "SYNC";
-    parameter integer INIT_OUT = 0;
-    parameter [0:0] IS_CE_INVERTED = 1'b0;
-    output O;
-    input CE;
     input I;
 endmodule
 
@@ -2420,12 +2388,6 @@ module LDPE (...);
     input D, G, GE, PRE;
 endmodule
 
-module LUT6_2 (...);
-    parameter [63:0] INIT = 64'h0000000000000000;
-    input I0, I1, I2, I3, I4, I5;
-    output O5, O6;
-endmodule
-
 module MMCME2_ADV (...);
     parameter BANDWIDTH = "OPTIMIZED";
     parameter real CLKFBOUT_MULT_F = 5.000;
@@ -3693,17 +3655,6 @@ module PULLUP (...);
     output O;
 endmodule
 
-module RAM128X1D (...);
-    parameter [127:0] INIT = 128'h00000000000000000000000000000000;
-    parameter [0:0] IS_WCLK_INVERTED = 1'b0;
-    output DPO, SPO;
-    input [6:0] A;
-    input [6:0] DPRA;
-    input D;
-    input WCLK;
-    input WE;
-endmodule
-
 module RAM128X1S (...);
     parameter [127:0] INIT = 128'h00000000000000000000000000000000;
     parameter [0:0] IS_WCLK_INVERTED = 1'b0;
@@ -3741,13 +3692,6 @@ module RAM32M (...);
     input [1:0] DID;
     input WCLK;
     input WE;
-endmodule
-
-module RAM32X1D (...);
-    parameter [31:0] INIT = 32'h00000000;
-    parameter [0:0] IS_WCLK_INVERTED = 1'b0;
-    output DPO, SPO;
-    input A0, A1, A2, A3, A4, D, DPRA0, DPRA1, DPRA2, DPRA3, DPRA4, WCLK, WE;
 endmodule
 
 module RAM32X1S (...);
@@ -3794,13 +3738,6 @@ module RAM64M (...);
     input WE;
 endmodule
 
-module RAM64X1D (...);
-    parameter [63:0] INIT = 64'h0000000000000000;
-    parameter [0:0] IS_WCLK_INVERTED = 1'b0;
-    output DPO, SPO;
-    input A0, A1, A2, A3, A4, A5, D, DPRA0, DPRA1, DPRA2, DPRA3, DPRA4, DPRA5, WCLK, WE;
-endmodule
-
 module RAM64X1S (...);
     parameter [63:0] INIT = 64'h0000000000000000;
     parameter [0:0] IS_WCLK_INVERTED = 1'b0;
@@ -3845,22 +3782,6 @@ module ROM64X1 (...);
     parameter [63:0] INIT = 64'h0000000000000000;
     output O;
     input A0, A1, A2, A3, A4, A5;
-endmodule
-
-module SRL16E (...);
-    parameter [15:0] INIT = 16'h0000;
-    parameter [0:0] IS_CLK_INVERTED = 1'b0;
-    output Q;
-    input A0, A1, A2, A3, CE, CLK, D;
-endmodule
-
-module SRLC32E (...);
-    parameter [31:0] INIT = 32'h00000000;
-    parameter [0:0] IS_CLK_INVERTED = 1'b0;
-    output Q;
-    output Q31;
-    input [4:0] A;
-    input CE, CLK, D;
 endmodule
 
 (* keep *)

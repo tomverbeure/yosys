@@ -27,18 +27,27 @@ module SB_IO (
 	reg dout_q_0, dout_q_1;
 	reg outena_q;
 
+	// IO tile generates a constant 1'b1 internally if global_cen is not connected
+	wire clken_pulled = CLOCK_ENABLE || CLOCK_ENABLE === 1'bz;
+	reg  clken_pulled_ri;
+	reg  clken_pulled_ro;
+
 	generate if (!NEG_TRIGGER) begin
-		always @(posedge INPUT_CLK)  if (CLOCK_ENABLE) din_q_0  <= PACKAGE_PIN;
-		always @(negedge INPUT_CLK)  if (CLOCK_ENABLE) din_q_1  <= PACKAGE_PIN;
-		always @(posedge OUTPUT_CLK) if (CLOCK_ENABLE) dout_q_0 <= D_OUT_0;
-		always @(negedge OUTPUT_CLK) if (CLOCK_ENABLE) dout_q_1 <= D_OUT_1;
-		always @(posedge OUTPUT_CLK) if (CLOCK_ENABLE) outena_q <= OUTPUT_ENABLE;
+		always @(posedge INPUT_CLK)                       clken_pulled_ri <= clken_pulled;
+		always @(posedge INPUT_CLK)  if (clken_pulled)    din_q_0         <= PACKAGE_PIN;
+		always @(negedge INPUT_CLK)  if (clken_pulled_ri) din_q_1         <= PACKAGE_PIN;
+		always @(posedge OUTPUT_CLK)                      clken_pulled_ro <= clken_pulled;
+		always @(posedge OUTPUT_CLK) if (clken_pulled)    dout_q_0        <= D_OUT_0;
+		always @(negedge OUTPUT_CLK) if (clken_pulled_ro) dout_q_1        <= D_OUT_1;
+		always @(posedge OUTPUT_CLK) if (clken_pulled)    outena_q        <= OUTPUT_ENABLE;
 	end else begin
-		always @(negedge INPUT_CLK)  if (CLOCK_ENABLE) din_q_0  <= PACKAGE_PIN;
-		always @(posedge INPUT_CLK)  if (CLOCK_ENABLE) din_q_1  <= PACKAGE_PIN;
-		always @(negedge OUTPUT_CLK) if (CLOCK_ENABLE) dout_q_0 <= D_OUT_0;
-		always @(posedge OUTPUT_CLK) if (CLOCK_ENABLE) dout_q_1 <= D_OUT_1;
-		always @(negedge OUTPUT_CLK) if (CLOCK_ENABLE) outena_q <= OUTPUT_ENABLE;
+		always @(negedge INPUT_CLK)                       clken_pulled_ri <= clken_pulled;
+		always @(negedge INPUT_CLK)  if (clken_pulled)    din_q_0         <= PACKAGE_PIN;
+		always @(posedge INPUT_CLK)  if (clken_pulled_ri) din_q_1         <= PACKAGE_PIN;
+		always @(negedge OUTPUT_CLK)                      clken_pulled_ro <= clken_pulled;
+		always @(negedge OUTPUT_CLK) if (clken_pulled)    dout_q_0        <= D_OUT_0;
+		always @(posedge OUTPUT_CLK) if (clken_pulled_ro) dout_q_1        <= D_OUT_1;
+		always @(negedge OUTPUT_CLK) if (clken_pulled)    outena_q        <= OUTPUT_ENABLE;
 	end endgenerate
 
 	always @* begin
@@ -118,6 +127,7 @@ endmodule
 
 // SiliconBlue Logic Cells
 
+(* abc_box_id = 2, lib_whitebox *)
 module SB_LUT4 (output O, input I0, I1, I2, I3);
 	parameter [15:0] LUT_INIT = 0;
 	wire [7:0] s3 = I3 ? LUT_INIT[15:8] : LUT_INIT[7:0];
@@ -126,6 +136,7 @@ module SB_LUT4 (output O, input I0, I1, I2, I3);
 	assign O = I0 ? s1[1] : s1[0];
 endmodule
 
+(* abc_box_id = 1, abc_carry="CI,CO", lib_whitebox *)
 module SB_CARRY (output CO, input I0, I1, CI);
 	assign CO = (I0 && I1) || ((I0 || I1) && CI);
 endmodule
@@ -921,10 +932,21 @@ endmodule
 
 (* blackbox *)
 module SB_HFOSC(
+	input TRIM0,
+	input TRIM1,
+	input TRIM2,
+	input TRIM3,
+	input TRIM4,
+	input TRIM5,
+	input TRIM6,
+	input TRIM7,
+	input TRIM8,
+	input TRIM9,
 	input CLKHFPU,
 	input CLKHFEN,
 	output CLKHF
 );
+parameter TRIM_EN = "0b0";
 parameter CLKHF_DIV = "0b00";
 endmodule
 
@@ -943,6 +965,30 @@ module SB_RGBA_DRV(
 	input RGB0PWM,
 	input RGB1PWM,
 	input RGB2PWM,
+	output RGB0,
+	output RGB1,
+	output RGB2
+);
+parameter CURRENT_MODE = "0b0";
+parameter RGB0_CURRENT = "0b000000";
+parameter RGB1_CURRENT = "0b000000";
+parameter RGB2_CURRENT = "0b000000";
+endmodule
+
+(* blackbox *)
+module SB_LED_DRV_CUR(
+	input EN,
+	output LEDPU
+);
+endmodule
+
+(* blackbox *)
+module SB_RGB_DRV(
+	input RGBLEDEN,
+	input RGB0PWM,
+	input RGB1PWM,
+	input RGB2PWM,
+	input RGBPU,
 	output RGB0,
 	output RGB1,
 	output RGB2

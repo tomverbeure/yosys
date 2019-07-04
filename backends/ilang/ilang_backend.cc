@@ -160,7 +160,10 @@ void ILANG_BACKEND::dump_cell(std::ostream &f, std::string indent, const RTLIL::
 	}
 	f << stringf("%s" "cell %s %s\n", indent.c_str(), cell->type.c_str(), cell->name.c_str());
 	for (auto &it : cell->parameters) {
-		f << stringf("%s  parameter%s %s ", indent.c_str(), (it.second.flags & RTLIL::CONST_FLAG_SIGNED) != 0 ? " signed" : "", it.first.c_str());
+		f << stringf("%s  parameter%s%s %s ", indent.c_str(),
+				(it.second.flags & RTLIL::CONST_FLAG_SIGNED) != 0 ? " signed" : "",
+				(it.second.flags & RTLIL::CONST_FLAG_REAL) != 0 ? " real" : "",
+				it.first.c_str());
 		dump_const(f, it.second);
 		f << stringf("\n");
 	}
@@ -480,6 +483,7 @@ struct DumpPass : public Pass {
 		std::stringstream buf;
 
 		if (!filename.empty()) {
+			rewrite_filename(filename);
 			std::ofstream *ff = new std::ofstream;
 			ff->open(filename.c_str(), append ? std::ofstream::app : std::ofstream::trunc);
 			if (ff->fail()) {

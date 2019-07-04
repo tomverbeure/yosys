@@ -87,6 +87,7 @@ Pass::pre_post_exec_state_t Pass::pre_execute()
 void Pass::post_execute(Pass::pre_post_exec_state_t state)
 {
 	IdString::checkpoint();
+	log_suppressed();
 
 	int64_t time_ns = PerformanceTimer::query() - state.begin_ns;
 	runtime_ns += time_ns;
@@ -544,6 +545,7 @@ void Backend::extra_args(std::ostream *&f, std::string &filename, std::vector<st
 		}
 
 		filename = arg;
+		rewrite_filename(filename);
 		std::ofstream *ff = new std::ofstream;
 		ff->open(filename.c_str(), std::ofstream::trunc);
 		yosys_output_files.insert(filename);

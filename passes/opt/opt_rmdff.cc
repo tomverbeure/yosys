@@ -17,19 +17,24 @@
  *
  */
 
-#include "kernel/register.h"
-#include "kernel/sigtools.h"
 #include "kernel/log.h"
-#include <stdlib.h>
+#include "kernel/register.h"
+#include "kernel/rtlil.h"
+#include "kernel/satgen.h"
+#include "kernel/sigtools.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 SigMap assign_map, dff_init_map;
 SigSet<RTLIL::Cell*> mux_drivers;
+dict<SigBit, RTLIL::Cell*> bit2driver;
 dict<SigBit, pool<SigBit>> init_attributes;
+
 bool keepdc;
+bool sat;
 
 void remove_init_attr(SigSpec sig)
 {
@@ -260,8 +265,8 @@ delete_dlatch:
 
 bool handle_dff(RTLIL::Module *mod, RTLIL::Cell *dff)
 {
-	RTLIL::SigSpec sig_d, sig_q, sig_c, sig_r;
-	RTLIL::Const val_cp, val_rp, val_rv;
+	RTLIL::SigSpec sig_d, sig_q, sig_c, sig_r, sig_e;
+	RTLIL::Const val_cp, val_rp, val_rv, val_ep;
 
 	if (dff->type == "$_FF_") {
 		sig_d = dff->getPort("\\D");
@@ -285,6 +290,16 @@ bool handle_dff(RTLIL::Module *mod, RTLIL::Cell *dff)
 		val_rp = RTLIL::Const(dff->type[7] == 'P', 1);
 		val_rv = RTLIL::Const(dff->type[8] == '1', 1);
 	}
+	else if (dff->type.substr(0,7) == "$_DFFE_" && dff->type.substr(9) == "_" &&
+			(dff->type[7] == 'N' || dff->type[7] == 'P') &&
+			(dff->type[8] == 'N' || dff->type[8] == 'P')) {
+		sig_d = dff->getPort("\\D");
+		sig_q = dff->getPort("\\Q");
+		sig_c = dff->getPort("\\C");
+		sig_e = dff->getPort("\\E");
+		val_cp = RTLIL::Const(dff->type[7] == 'P', 1);
+		val_ep = RTLIL::Const(dff->type[8] == 'P', 1);
+	}
 	else if (dff->type == "$ff") {
 		sig_d = dff->getPort("\\D");
 		sig_q = dff->getPort("\\Q");
@@ -294,6 +309,14 @@ bool handle_dff(RTLIL::Module *mod, RTLIL::Cell *dff)
 		sig_q = dff->getPort("\\Q");
 		sig_c = dff->getPort("\\CLK");
 		val_cp = RTLIL::Const(dff->parameters["\\CLK_POLARITY"].as_bool(), 1);
+	}
+	else if (dff->type == "$dffe") {
+		sig_e = dff->getPort("\\EN");
+		sig_d = dff->getPort("\\D");
+		sig_q = dff->getPort("\\Q");
+		sig_c = dff->getPort("\\CLK");
+		val_cp = RTLIL::Const(dff->parameters["\\CLK_POLARITY"].as_bool(), 1);
+		val_ep = RTLIL::Const(dff->parameters["\\EN_POLARITY"].as_bool(), 1);
 	}
 	else if (dff->type == "$adff") {
 		sig_d = dff->getPort("\\D");
@@ -337,39 +360,60 @@ bool handle_dff(RTLIL::Module *mod, RTLIL::Cell *dff)
 		}
 	}
 
+	// If clock is driven by a constant and (i) no reset signal
+	//                                      (ii) Q has no initial value
+	//                                      (iii) initial value is same as reset value
 	if (!sig_c.empty() && sig_c.is_fully_const() && (!sig_r.size() || !has_init || val_init == val_rv)) {
 		if (val_rv.bits.size() == 0)
 			val_rv = val_init;
+		// Q is permanently reset value or initial value
 		mod->connect(sig_q, val_rv);
 		goto delete_dff;
 	}
 
+	// If D is fully undefined and reset signal present and (i) Q has no initial value
+	//                                                     (ii) initial value is same as reset value
 	if (sig_d.is_fully_undef() && sig_r.size() && (!has_init || val_init == val_rv)) {
+		// Q is permanently reset value
 		mod->connect(sig_q, val_rv);
 		goto delete_dff;
 	}
 
+	// If D is fully undefined and no reset signal and Q has an initial value
 	if (sig_d.is_fully_undef() && !sig_r.size() && has_init) {
+		// Q is permanently initial value
 		mod->connect(sig_q, val_init);
 		goto delete_dff;
 	}
 
+	// If D is fully constant and (i) no reset signal
+	//                            (ii) reset value is same as constant D
+	//                        and (a) has no initial value
+	//                            (b) initial value same as constant D
 	if (sig_d.is_fully_const() && (!sig_r.size() || val_rv == sig_d.as_const()) && (!has_init || val_init == sig_d.as_const())) {
+		// Q is permanently D
 		mod->connect(sig_q, sig_d);
 		goto delete_dff;
 	}
 
+	// If D input is same as Q output and (i) no reset signal
+	//                                    (ii) no initial signal
+	//                                    (iii) initial value is same as reset value
 	if (sig_d == sig_q && (sig_r.empty() || !has_init || val_init == val_rv)) {
+		// Q is permanently reset value or initial value
 		if (sig_r.size())
 			mod->connect(sig_q, val_rv);
-		if (has_init)
+		else if (has_init)
 			mod->connect(sig_q, val_init);
 		goto delete_dff;
 	}
 
+	// If reset signal is present, and is fully constant
 	if (!sig_r.empty() && sig_r.is_fully_const())
 	{
+		// If reset value is permanently active or if reset is undefined
 		if (sig_r == val_rp || sig_r.is_fully_undef()) {
+			// Q is permanently reset value
 			mod->connect(sig_q, val_rv);
 			goto delete_dff;
 		}
@@ -389,12 +433,108 @@ bool handle_dff(RTLIL::Module *mod, RTLIL::Cell *dff)
 		dff->unsetPort("\\R");
 	}
 
+	// If enable signal is present, and is fully constant
+	if (!sig_e.empty() && sig_e.is_fully_const())
+	{
+		// If enable value is permanently inactive
+		if (sig_e != val_ep) {
+			// Q is permanently initial value
+			mod->connect(sig_q, val_init);
+			goto delete_dff;
+		}
+
+		log("Removing unused enable from %s (%s) from module %s.\n", log_id(dff), log_id(dff->type), log_id(mod));
+
+		if (dff->type == "$dffe") {
+			dff->type = "$dff";
+			dff->unsetPort("\\EN");
+			dff->unsetParam("\\EN_POLARITY");
+			return true;
+		}
+
+		log_assert(dff->type.substr(0,7) == "$_DFFE_");
+		dff->type = stringf("$_DFF_%c_", + dff->type[7]);
+		dff->unsetPort("\\E");
+	}
+
+	if (sat && has_init && (!sig_r.size() || val_init == val_rv))
+	{
+		bool removed_sigbits = false;
+
+		ezSatPtr ez;
+		SatGen satgen(ez.get(), &assign_map);
+		pool<Cell*> sat_cells;
+
+		std::function<void(Cell*)> sat_import_cell = [&](Cell *c) {
+			if (!sat_cells.insert(c).second)
+				return;
+			if (!satgen.importCell(c))
+				return;
+			for (auto &conn : c->connections()) {
+				if (!c->input(conn.first))
+					continue;
+				for (auto bit : assign_map(conn.second))
+					if (bit2driver.count(bit))
+						sat_import_cell(bit2driver.at(bit));
+			}
+		};
+
+		// For each register bit, try to prove that it cannot change from the initial value. If so, remove it
+		for (int position = 0; position < GetSize(sig_d); position += 1) {
+			RTLIL::SigBit q_sigbit = sig_q[position];
+			RTLIL::SigBit d_sigbit = sig_d[position];
+
+			if ((!q_sigbit.wire) || (!d_sigbit.wire))
+				continue;
+
+			if (!bit2driver.count(d_sigbit))
+				continue;
+
+			sat_import_cell(bit2driver.at(d_sigbit));
+
+			RTLIL::State sigbit_init_val = val_init[position];
+			if (sigbit_init_val != State::S0 && sigbit_init_val != State::S1)
+				continue;
+
+			int init_sat_pi = satgen.importSigSpec(sigbit_init_val).front();
+			int q_sat_pi = satgen.importSigBit(q_sigbit);
+			int d_sat_pi = satgen.importSigBit(d_sigbit);
+
+			// Try to find out whether the register bit can change under some circumstances
+			bool counter_example_found = ez->solve(ez->IFF(q_sat_pi, init_sat_pi), ez->NOT(ez->IFF(d_sat_pi, init_sat_pi)));
+
+			// If the register bit cannot change, we can replace it with a constant
+			if (!counter_example_found)
+			{
+				log("Setting constant %d-bit at position %d on %s (%s) from module %s.\n", sigbit_init_val ? 1 : 0,
+						position, log_id(dff), log_id(dff->type), log_id(mod));
+
+				SigSpec tmp = dff->getPort("\\D");
+				tmp[position] = sigbit_init_val;
+				dff->setPort("\\D", tmp);
+
+				removed_sigbits = true;
+			}
+		}
+
+		if (removed_sigbits) {
+			handle_dff(mod, dff);
+			return true;
+		}
+	}
+
+
 	return false;
 
 delete_dff:
 	log("Removing %s (%s) from module %s.\n", log_id(dff), log_id(dff->type), log_id(mod));
 	remove_init_attr(dff->getPort("\\Q"));
 	mod->remove(dff);
+
+	for (auto &entry : bit2driver)
+		if (entry.second == dff)
+			bit2driver.erase(entry.first);
+
 	return true;
 }
 
@@ -404,10 +544,14 @@ struct OptRmdffPass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    opt_rmdff [-keepdc] [selection]\n");
+		log("    opt_rmdff [-keepdc] [-sat] [selection]\n");
 		log("\n");
 		log("This pass identifies flip-flops with constant inputs and replaces them with\n");
 		log("a constant driver.\n");
+		log("\n");
+		log("    -sat\n");
+		log("        additionally invoke SAT solver to detect and remove flip-flops (with \n");
+		log("        non-constant inputs) that can also be replaced with a constant driver\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
@@ -416,6 +560,7 @@ struct OptRmdffPass : public Pass {
 		log_header(design, "Executing OPT_RMDFF pass (remove dff with constant values).\n");
 
 		keepdc = false;
+		sat = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -423,18 +568,22 @@ struct OptRmdffPass : public Pass {
 				keepdc = true;
 				continue;
 			}
+			if (args[argidx] == "-sat") {
+				sat = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
-		for (auto module : design->selected_modules())
-		{
+		for (auto module : design->selected_modules()) {
 			pool<SigBit> driven_bits;
 			dict<SigBit, State> init_bits;
 
 			assign_map.set(module);
 			dff_init_map.set(module);
 			mux_drivers.clear();
+			bit2driver.clear();
 			init_attributes.clear();
 
 			for (auto wire : module->wires())
@@ -459,17 +608,21 @@ struct OptRmdffPass : public Pass {
 						driven_bits.insert(bit);
 				}
 			}
-			mux_drivers.clear();
 
 			std::vector<RTLIL::IdString> dff_list;
 			std::vector<RTLIL::IdString> dffsr_list;
 			std::vector<RTLIL::IdString> dlatch_list;
 			for (auto cell : module->cells())
 			{
-				for (auto &conn : cell->connections())
-					if (cell->output(conn.first) || !cell->known())
-						for (auto bit : assign_map(conn.second))
+				for (auto &conn : cell->connections()) {
+					bool is_output = cell->output(conn.first);
+					if (is_output || !cell->known())
+						for (auto bit : assign_map(conn.second)) {
+							if (is_output)
+								bit2driver[bit] = cell;
 							driven_bits.insert(bit);
+						}
+				}
 
 				if (cell->type == "$mux" || cell->type == "$pmux") {
 					if (cell->getPort("\\A").size() == cell->getPort("\\B").size())
@@ -489,7 +642,8 @@ struct OptRmdffPass : public Pass {
 				if (cell->type.in("$_FF_", "$_DFF_N_", "$_DFF_P_",
 						"$_DFF_NN0_", "$_DFF_NN1_", "$_DFF_NP0_", "$_DFF_NP1_",
 						"$_DFF_PN0_", "$_DFF_PN1_", "$_DFF_PP0_", "$_DFF_PP1_",
-						"$ff", "$dff", "$adff"))
+						"$_DFFE_NN_", "$_DFFE_NP_", "$_DFFE_PN_", "$_DFFE_PP_",
+						"$ff", "$dff", "$dffe", "$adff"))
 					dff_list.push_back(cell->name);
 
 				if (cell->type.in("$dlatch", "$_DLATCH_P_", "$_DLATCH_N_"))
@@ -540,6 +694,7 @@ struct OptRmdffPass : public Pass {
 
 		assign_map.clear();
 		mux_drivers.clear();
+		bit2driver.clear();
 		init_attributes.clear();
 
 		if (total_count || total_initdrv)

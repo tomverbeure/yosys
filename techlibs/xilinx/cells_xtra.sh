@@ -28,12 +28,12 @@ function xtract_cell_decl()
 	# xtract_cell_decl BUFG
 	xtract_cell_decl BUFGCE
 	xtract_cell_decl BUFGCE_1
-	xtract_cell_decl BUFGCTRL
+	#xtract_cell_decl BUFGCTRL
 	xtract_cell_decl BUFGMUX
 	xtract_cell_decl BUFGMUX_1
 	xtract_cell_decl BUFGMUX_CTRL
 	xtract_cell_decl BUFH
-	xtract_cell_decl BUFHCE
+	#xtract_cell_decl BUFHCE
 	xtract_cell_decl BUFIO
 	xtract_cell_decl BUFMR
 	xtract_cell_decl BUFMRCE
@@ -92,7 +92,7 @@ function xtract_cell_decl()
 	# xtract_cell_decl LUT4
 	# xtract_cell_decl LUT5
 	# xtract_cell_decl LUT6
-	xtract_cell_decl LUT6_2
+	#xtract_cell_decl LUT6_2
 	xtract_cell_decl MMCME2_ADV
 	xtract_cell_decl MMCME2_BASE
 	# xtract_cell_decl MUXF7
@@ -116,16 +116,16 @@ function xtract_cell_decl()
 	xtract_cell_decl PS7 "(* keep *)"
 	xtract_cell_decl PULLDOWN
 	xtract_cell_decl PULLUP
-	xtract_cell_decl RAM128X1D
+	#xtract_cell_decl RAM128X1D
 	xtract_cell_decl RAM128X1S
 	xtract_cell_decl RAM256X1S
 	xtract_cell_decl RAM32M
-	xtract_cell_decl RAM32X1D
+	#xtract_cell_decl RAM32X1D
 	xtract_cell_decl RAM32X1S
 	xtract_cell_decl RAM32X1S_1
 	xtract_cell_decl RAM32X2S
 	xtract_cell_decl RAM64M
-	xtract_cell_decl RAM64X1D
+	#xtract_cell_decl RAM64X1D
 	xtract_cell_decl RAM64X1S
 	xtract_cell_decl RAM64X1S_1
 	xtract_cell_decl RAM64X2S
@@ -135,8 +135,8 @@ function xtract_cell_decl()
 	xtract_cell_decl ROM256X1
 	xtract_cell_decl ROM32X1
 	xtract_cell_decl ROM64X1
-	xtract_cell_decl SRL16E
-	xtract_cell_decl SRLC32E
+	#xtract_cell_decl SRL16E
+	#xtract_cell_decl SRLC32E
 	xtract_cell_decl STARTUPE2 "(* keep *)"
 	xtract_cell_decl USR_ACCESSE2
 	xtract_cell_decl XADC
