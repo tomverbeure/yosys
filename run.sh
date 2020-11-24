@@ -1,2 +1,2 @@
 
-make && ./yosys -p "read_verilog ../curtl/experiments/verilog/test.v; write_cxxrtl test.cpp; small_nets"
+make && ./yosys -p "read_verilog ../curtl/experiments/verilog/test.v; write_cxxrtl test.cpp; write_ilang test.ilang; small_nets"
