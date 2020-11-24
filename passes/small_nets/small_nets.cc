@@ -29,6 +29,9 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+struct SmallNetsWorker
+{
+
 /*
     The goal of cuRTL is do everything with 32-bit integers.
     If there are nets that are larger than 32-bit, or if there are
@@ -37,23 +40,84 @@ PRIVATE_NAMESPACE_BEGIN
 
 */
 
+    void split_or_reduce(RTLIL::Module *module, RTLIL::Cell *cell, int max_width)
+    {
 
-void list_cell_connections(RTLIL::Module *module)
-{
-    SigMap sigmap(module);
+#if 0
+        SigBit a = module->addWire(NEW_ID);
+        SigBit b = module->addWire(NEW_ID);
+        module->connect(a,b);
+#endif
+#if 1
+        if(!cell->type.in(ID($reduce_or))){
+            return;
+        }
+    
+        RTLIL::SigSpec inputA = cell->getPort(ID::A);
+    
+        if (inputA.size() > max_width){
+            RTLIL::Cell * cell_lsb   = module->addCell(NEW_ID, ID($reduce_or));
+            RTLIL::Wire * lsb_y = module->addWire(NEW_ID, 1);
+            RTLIL::SigSpec lsb_y_s = RTLIL::SigSpec(lsb_y);
 
-    for(auto cell: module->cells()){
-        log("cell: %s\n", log_id(cell));
-        for(auto &conn : cell->connections()){
-            // conn = const dict<RTLIL::IdString, RTLIL::SigSpec> &RTLIL::Cell::connections() const
+            RTLIL::Cell * cell_msb   = module->addCell(NEW_ID, ID($reduce_or));
+            RTLIL::Wire * msb_y = module->addWire(NEW_ID, 1);
+            RTLIL::SigSpec msb_y_s = RTLIL::SigSpec(msb_y);
+    
+            cell_lsb->setPort(ID::A, inputA.extract(0, max_width));
+            cell_lsb->setPort(ID::Y, lsb_y_s);
+            cell_lsb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
+            cell_lsb->parameters[ID::A_WIDTH] = RTLIL::Const(max_width);
+            cell_lsb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
 
-            SigSpec sigspec = conn.second;
+            cell_msb->setPort(ID::A, inputA.extract_end(max_width));
+            cell_msb->setPort(ID::Y, msb_y_s);
+            cell_msb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
+            cell_msb->parameters[ID::A_WIDTH] = RTLIL::Const(inputA.size()-max_width);
+            cell_msb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
 
-            log("    %s -> %d\n", log_id(conn.first), sigspec.size());
+            RTLIL::SigSpec finalA = RTLIL::SigSpec(lsb_y_s);
+            finalA.append(msb_y_s);
 
+            cell->setPort(ID::A, finalA);
+            cell->parameters[ID::A_WIDTH] = RTLIL::Const(2);
+
+            log_cell(cell_lsb);
+            log_cell(cell_msb);
+            log_cell(cell);
+        }
+#endif
+    }
+    
+    
+    void list_cell_connections(RTLIL::Module *module)
+    {
+        std::vector<RTLIL::Cell*> cells;
+
+        for(RTLIL::Cell *cell: module->cells()){
+            log("cell: %s (%s)\n", log_id(cell), log_id(cell->type));
+            bool too_large = false;
+            for(auto &conn : cell->connections()){
+                // conn = const dict<RTLIL::IdString, RTLIL::SigSpec> &RTLIL::Cell::connections() const
+    
+                SigSpec sigspec = conn.second;
+    
+                log("    %s -> %d\n", log_id(conn.first), sigspec.size());
+    
+                if (sigspec.size() > 32){
+                    too_large = true;
+                }
+            }
+            if (too_large){
+                cells.push_back(cell);
+            }
+        }
+
+        for(auto cell : cells){
+            split_or_reduce(module, cell, 32);
         }
     }
-}
+};
 
 struct SmallNets : public Pass {
 	SmallNets() : Pass("small_nets", "perform const folding and simple expression rewriting") { }
@@ -84,8 +148,14 @@ struct SmallNets : public Pass {
 		extra_args(args, argidx, design);
 
                 for(auto module: design->selected_modules()){
+		    if (module->has_processes_warn())
+		        continue;
+
+                    SmallNetsWorker worker;
+
+
                     log("Listing cell connections of %s\n", log_id(module));
-                    list_cell_connections(module);
+                    worker.list_cell_connections(module);
                 }
 #if 0
 		CellTypes ct(design);
