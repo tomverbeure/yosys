@@ -42,64 +42,52 @@ struct SmallNetsWorker
 
     void split_or_reduce(RTLIL::Module *module, RTLIL::Cell *cell, int max_width)
     {
+        if(cell->type.in(ID($reduce_or))){
+            RTLIL::SigSpec inputA = cell->getPort(ID::A);
+    
+            // Split single port in one that conforms to max_width and one with all the rest.
+            if (inputA.size() > max_width){
+                RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, ID($reduce_or));
+                RTLIL::Wire * lsb_y     = module->addWire(NEW_ID, 1);
+    
+                RTLIL::Cell * cell_msb  = module->addCell(NEW_ID, ID($reduce_or));
+                RTLIL::Wire * msb_y     = module->addWire(NEW_ID, 1);
+        
+                cell_lsb->setPort(ID::A, inputA.extract(0, max_width));
+                cell_lsb->setPort(ID::Y, lsb_y);
+                cell_lsb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
+                cell_lsb->parameters[ID::A_WIDTH] = RTLIL::Const(max_width);
+                cell_lsb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
+    
+                cell_msb->setPort(ID::A, inputA.extract_end(max_width));
+                cell_msb->setPort(ID::Y, msb_y);
+                cell_msb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
+                cell_msb->parameters[ID::A_WIDTH] = RTLIL::Const(inputA.size()-max_width);
+                cell_msb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
+    
+                RTLIL::SigSpec finalA = RTLIL::SigSpec(lsb_y);
+                finalA.append(msb_y);
+    
+                cell->setPort(ID::A, finalA);
+                cell->parameters[ID::A_WIDTH] = RTLIL::Const(2);
 
-#if 0
-        SigBit a = module->addWire(NEW_ID);
-        SigBit b = module->addWire(NEW_ID);
-        module->connect(a,b);
-#endif
-#if 1
-        if(!cell->type.in(ID($reduce_or))){
-            return;
+                log_cell(cell_lsb);
+                log_cell(cell_msb);
+                log_cell(cell);
+            }
         }
-    
-        RTLIL::SigSpec inputA = cell->getPort(ID::A);
-    
-        if (inputA.size() > max_width){
-            RTLIL::Cell * cell_lsb   = module->addCell(NEW_ID, ID($reduce_or));
-            RTLIL::Wire * lsb_y = module->addWire(NEW_ID, 1);
-            RTLIL::SigSpec lsb_y_s = RTLIL::SigSpec(lsb_y);
-
-            RTLIL::Cell * cell_msb   = module->addCell(NEW_ID, ID($reduce_or));
-            RTLIL::Wire * msb_y = module->addWire(NEW_ID, 1);
-            RTLIL::SigSpec msb_y_s = RTLIL::SigSpec(msb_y);
-    
-            cell_lsb->setPort(ID::A, inputA.extract(0, max_width));
-            cell_lsb->setPort(ID::Y, lsb_y_s);
-            cell_lsb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
-            cell_lsb->parameters[ID::A_WIDTH] = RTLIL::Const(max_width);
-            cell_lsb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
-
-            cell_msb->setPort(ID::A, inputA.extract_end(max_width));
-            cell_msb->setPort(ID::Y, msb_y_s);
-            cell_msb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
-            cell_msb->parameters[ID::A_WIDTH] = RTLIL::Const(inputA.size()-max_width);
-            cell_msb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
-
-            RTLIL::SigSpec finalA = RTLIL::SigSpec(lsb_y_s);
-            finalA.append(msb_y_s);
-
-            cell->setPort(ID::A, finalA);
-            cell->parameters[ID::A_WIDTH] = RTLIL::Const(2);
-
-            log_cell(cell_lsb);
-            log_cell(cell_msb);
-            log_cell(cell);
-        }
-#endif
     }
     
     
     void list_cell_connections(RTLIL::Module *module)
     {
+#if 1
         std::vector<RTLIL::Cell*> cells;
 
         for(RTLIL::Cell *cell: module->cells()){
             log("cell: %s (%s)\n", log_id(cell), log_id(cell->type));
             bool too_large = false;
             for(auto &conn : cell->connections()){
-                // conn = const dict<RTLIL::IdString, RTLIL::SigSpec> &RTLIL::Cell::connections() const
-    
                 SigSpec sigspec = conn.second;
     
                 log("    %s -> %d\n", log_id(conn.first), sigspec.size());
@@ -116,6 +104,24 @@ struct SmallNetsWorker
         for(auto cell : cells){
             split_or_reduce(module, cell, 32);
         }
+#endif
+
+#if 0
+        // Experiment: create a new port driven by a reduce_xor.
+        RTLIL::Cell * cell_xor = module->addCell(NEW_ID, ID($reduce_xor));
+        cell_xor->setPort(ID::A, RTLIL::Const(1, 2));
+        cell_xor->parameters[ID::A_SIGNED] = RTLIL::Const(1);
+        cell_xor->parameters[ID::A_WIDTH] = RTLIL::Const(2);
+        cell_xor->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
+
+        RTLIL::Wire *test_out = module->addWire(ID(test_out));
+        test_out->port_output = true;
+        SigSpec test_out_s = SigSpec(test_out);
+
+        cell_xor->setPort(ID::Y, test_out_s);
+
+        module->fixup_ports();
+#endif
     }
 };
 
@@ -153,39 +159,9 @@ struct SmallNets : public Pass {
 
                     SmallNetsWorker worker;
 
-
                     log("Listing cell connections of %s\n", log_id(module));
                     worker.list_cell_connections(module);
                 }
-#if 0
-		CellTypes ct(design);
-		for (auto module : design->selected_modules())
-		{
-			log("Optimizing module %s.\n", log_id(module));
-
-			if (undriven) {
-				did_something = false;
-				replace_undriven(module, ct);
-				if (did_something)
-					design->scratchpad_set_bool("opt.did_something", true);
-			}
-
-			do {
-				do {
-					did_something = false;
-					replace_const_cells(design, module, false /* consume_x */, mux_undef, mux_bool, do_fine, keepdc, noclkinv);
-					if (did_something)
-						design->scratchpad_set_bool("opt.did_something", true);
-				} while (did_something);
-				if (!keepdc)
-					replace_const_cells(design, module, true /* consume_x */, mux_undef, mux_bool, do_fine, keepdc, noclkinv);
-				if (did_something)
-					design->scratchpad_set_bool("opt.did_something", true);
-			} while (did_something);
-
-			log_suppressed();
-		}
-#endif
 
 		log_pop();
 	}
