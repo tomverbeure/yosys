@@ -42,15 +42,15 @@ struct SmallNetsWorker
 
     void split_or_reduce(RTLIL::Module *module, RTLIL::Cell *cell, int max_width)
     {
-        if(cell->type.in(ID($reduce_or))){
+        if(cell->type.in(ID($reduce_or), ID($reduce_and), ID($reduce_xor), ID($reduce_xnor) )){
             RTLIL::SigSpec inputA = cell->getPort(ID::A);
     
             // Split single port in one that conforms to max_width and one with all the rest.
             if (inputA.size() > max_width){
-                RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, ID($reduce_or));
+                RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, cell->type);
                 RTLIL::Wire * lsb_y     = module->addWire(NEW_ID, 1);
     
-                RTLIL::Cell * cell_msb  = module->addCell(NEW_ID, ID($reduce_or));
+                RTLIL::Cell * cell_msb  = module->addCell(NEW_ID, cell->type);
                 RTLIL::Wire * msb_y     = module->addWire(NEW_ID, 1);
         
                 cell_lsb->setPort(ID::A, inputA.extract(0, max_width));
