@@ -42,38 +42,158 @@ struct SmallNetsWorker
 
     void split_or_reduce(RTLIL::Module *module, RTLIL::Cell *cell, int max_width)
     {
-        if(cell->type.in(ID($reduce_or), ID($reduce_and), ID($reduce_xor), ID($reduce_xnor) )){
-            RTLIL::SigSpec inputA = cell->getPort(ID::A);
-    
+        if(cell->type.in(ID($reduce_or), ID($reduce_and), ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool),
+                         ID($logic_not) ))
+        {
+            RTLIL::SigSpec inputA  = cell->getPort(ID::A);
+            RTLIL::SigSpec outputY = cell->getPort(ID::Y);
+
+            bool a_oversized = inputA.size()  > max_width;
+            //bool y_oversized = outputY.size() > max_width;
+
+            // TODO: deal with output ports that are larger max_width
             // Split single port in one that conforms to max_width and one with all the rest.
-            if (inputA.size() > max_width){
-                RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, cell->type);
-                RTLIL::Wire * lsb_y     = module->addWire(NEW_ID, 1);
+            if (a_oversized){
+
+                IdString cell_type_lsb;
+                IdString cell_type_msb;
+                IdString cell_type_merge;
+
+                if(cell->type.in(ID($reduce_or), ID($reduce_and), ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool) )){
+                    cell_type_lsb   = cell->type;
+                    cell_type_msb   = cell->type;
+                    cell_type_merge = cell->type;
+                }
+                else if(cell->type.in(ID($logic_not) )){
+                    cell_type_lsb   = cell->type;
+                    cell_type_msb   = cell->type;
+                    cell_type_merge = ID($reduce_and);
+                }
+
+                RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, cell_type_lsb);
+                RTLIL::Wire * y_lsb     = module->addWire(NEW_ID, 1);
     
-                RTLIL::Cell * cell_msb  = module->addCell(NEW_ID, cell->type);
-                RTLIL::Wire * msb_y     = module->addWire(NEW_ID, 1);
+                RTLIL::Cell * cell_msb  = module->addCell(NEW_ID, cell_type_msb);
+                RTLIL::Wire * y_msb     = module->addWire(NEW_ID, 1);
         
                 cell_lsb->setPort(ID::A, inputA.extract(0, max_width));
-                cell_lsb->setPort(ID::Y, lsb_y);
+                cell_lsb->setPort(ID::Y, y_lsb);
                 cell_lsb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
                 cell_lsb->parameters[ID::A_WIDTH] = RTLIL::Const(max_width);
                 cell_lsb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
     
                 cell_msb->setPort(ID::A, inputA.extract_end(max_width));
-                cell_msb->setPort(ID::Y, msb_y);
+                cell_msb->setPort(ID::Y, y_msb);
                 cell_msb->parameters[ID::A_SIGNED] = RTLIL::Const(0);
                 cell_msb->parameters[ID::A_WIDTH] = RTLIL::Const(inputA.size()-max_width);
                 cell_msb->parameters[ID::Y_WIDTH] = RTLIL::Const(1);
     
-                RTLIL::SigSpec finalA = RTLIL::SigSpec(lsb_y);
-                finalA.append(msb_y);
+                RTLIL::SigSpec finalA = RTLIL::SigSpec(y_lsb);
+                finalA.append(y_msb);
     
+                cell->type = cell_type_merge;
                 cell->setPort(ID::A, finalA);
                 cell->parameters[ID::A_WIDTH] = RTLIL::Const(2);
 
                 log_cell(cell_lsb);
                 log_cell(cell_msb);
                 log_cell(cell);
+            }
+        }
+        else if (cell->type.in(ID($and))){
+
+            RTLIL::SigSpec inputA  = cell->getPort(ID::A);
+            RTLIL::SigSpec inputB  = cell->getPort(ID::B);
+            RTLIL::SigSpec outputY = cell->getPort(ID::Y);
+
+            bool a_oversized = inputA.size()  > max_width;
+            bool b_oversized = inputB.size()  > max_width;
+            bool y_oversized = outputY.size() > max_width;
+
+            if (a_oversized || b_oversized){
+
+                IdString cell_type_lsb;
+                IdString cell_type_msb;
+
+                if(cell->type.in(ID($and))){
+                    cell_type_lsb   = cell->type;
+                    cell_type_msb   = cell->type;
+                }
+
+                RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, cell_type_lsb);
+
+                RTLIL::SigSpec a_lsb, a_msb;
+
+                if (a_oversized){
+                    a_lsb = inputA.extract(0,max_width);
+                    a_msb = inputA.extract_end(max_width);
+                }
+                else{
+                    a_lsb = inputA;
+
+                    if (cell->parameters[ID::A_SIGNED] == 1){
+                        a_msb = inputA.extract(inputA.size()-1);
+                    }
+                    else{
+                        a_msb = RTLIL::Const(0);
+                    }
+                }
+
+                RTLIL::SigSpec b_lsb, b_msb;
+
+                if (b_oversized){
+                    b_lsb = inputB.extract(0,max_width);
+                    b_msb = inputB.extract_end(max_width);
+                }
+                else{
+                    b_lsb = inputB;
+
+                    if (cell->parameters[ID::B_SIGNED] == 1){
+                        b_msb = inputB.extract(inputB.size()-1);
+                    }
+                    else{
+                        b_msb = RTLIL::Const(0);
+                    }
+                }
+
+                cell_lsb->setPort(ID::A, a_lsb);
+                cell_lsb->parameters[ID::A_SIGNED] = cell->parameters[ID::A_SIGNED];
+                cell_lsb->parameters[ID::A_WIDTH] = a_lsb.size();
+
+                cell_lsb->setPort(ID::B, b_lsb);
+                cell_lsb->parameters[ID::B_SIGNED] = cell->parameters[ID::B_SIGNED];
+                cell_lsb->parameters[ID::B_WIDTH] = b_lsb.size();
+
+                if (y_oversized){
+                    RTLIL::SigSpec y_lsb, y_msb;
+                    y_lsb = outputY.extract(0, max_width);
+                    y_msb = outputY.extract_end(max_width);
+
+                    cell_lsb->setPort(ID::Y, y_lsb);
+                    cell_lsb->parameters[ID::Y_WIDTH] = y_lsb.size();
+
+                    RTLIL::Cell * cell_msb  = module->addCell(NEW_ID, cell_type_msb);
+
+                    cell_msb->setPort(ID::A, a_msb);
+                    cell_msb->parameters[ID::A_SIGNED] = cell->parameters[ID::A_SIGNED];
+                    cell_msb->parameters[ID::A_WIDTH] = a_msb.size();
+
+                    cell_msb->setPort(ID::B, b_msb);
+                    cell_msb->parameters[ID::B_SIGNED] = cell->parameters[ID::B_SIGNED];
+                    cell_msb->parameters[ID::B_WIDTH] = b_msb.size();
+
+                    cell_msb->setPort(ID::Y, y_msb);
+                    cell_msb->parameters[ID::Y_WIDTH] = y_msb.size();
+                }
+                else{
+                    RTLIL::SigSpec y_lsb;
+                    y_lsb = outputY;
+
+                    cell_lsb->setPort(ID::Y, y_lsb);
+                    cell_lsb->parameters[ID::Y_WIDTH] = y_lsb.size();
+                }
+
+                module->remove(cell);
             }
         }
     }
