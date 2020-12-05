@@ -100,7 +100,7 @@ struct SmallNetsWorker
                 log_cell(cell);
             }
         }
-        else if (cell->type.in(ID($and))){
+        else if (cell->type.in(ID($and),ID($or),ID($xor),ID($xnor))){
 
             RTLIL::SigSpec inputA  = cell->getPort(ID::A);
             RTLIL::SigSpec inputB  = cell->getPort(ID::B);
@@ -110,15 +110,15 @@ struct SmallNetsWorker
             bool b_oversized = inputB.size()  > max_width;
             bool y_oversized = outputY.size() > max_width;
 
-            if (a_oversized || b_oversized){
+            if (a_oversized || b_oversized || y_oversized){
 
                 IdString cell_type_lsb;
                 IdString cell_type_msb;
 
-                if(cell->type.in(ID($and))){
+//                if(cell->type.in(ID($and),ID($or))){
                     cell_type_lsb   = cell->type;
                     cell_type_msb   = cell->type;
-                }
+//                }
 
                 RTLIL::Cell * cell_lsb  = module->addCell(NEW_ID, cell_type_lsb);
 
