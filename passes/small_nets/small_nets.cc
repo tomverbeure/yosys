@@ -49,10 +49,8 @@ struct SmallNetsWorker
             RTLIL::SigSpec outputY = cell->getPort(ID::Y);
 
             bool a_oversized = inputA.size()  > max_width;
-            //bool y_oversized = outputY.size() > max_width;
+            bool y_oversized = outputY.size() > max_width;
 
-            // TODO: deal with output ports that are larger max_width
-            // Split single port in one that conforms to max_width and one with all the rest.
             if (a_oversized){
 
                 IdString cell_type_lsb;
@@ -98,6 +96,16 @@ struct SmallNetsWorker
                 log_cell(cell_lsb);
                 log_cell(cell_msb);
                 log_cell(cell);
+            }
+
+            if (y_oversized){
+                RTLIL::SigSpec y_lsb;
+                y_lsb = outputY.extract(0, max_width);
+                cell->parameters[ID::Y_WIDTH] = y_lsb.size();
+                cell->setPort(ID::Y, y_lsb);
+
+                outputY.remove(0, max_width);
+                module->connect(outputY, Const(0, GetSize(outputY)));
             }
         }
         else if (cell->type.in(ID($and),ID($or),ID($xor),ID($xnor))){
@@ -194,6 +202,61 @@ struct SmallNetsWorker
                 }
 
                 module->remove(cell);
+            }
+        }
+        else if (cell->type.in(ID($logic_and),ID($logic_or))){
+
+            RTLIL::SigSpec inputA  = cell->getPort(ID::A);
+            RTLIL::SigSpec inputB  = cell->getPort(ID::B);
+            RTLIL::SigSpec outputY = cell->getPort(ID::Y);
+
+            bool a_oversized = inputA.size()  > max_width;
+            bool b_oversized = inputB.size()  > max_width;
+            bool y_oversized = outputY.size() > max_width;
+
+            // In the first pass, the oversized input to $logic_XXX gets
+            // replaced by a single bit $reduce_bool output. The input
+            // to $reduce_bool will still be oversized, but that will be
+            // split up when small_nets is called again.
+
+            if (a_oversized){
+                RTLIL::Cell * cell_bool  = module->addCell(NEW_ID, ID($reduce_bool));
+                RTLIL::Wire * y_bool = module->addWire(NEW_ID, 1);
+
+                cell_bool->parameters[ID::A_SIGNED] = cell->parameters[ID::A_SIGNED];
+                cell_bool->parameters[ID::A_WIDTH]  = cell->parameters[ID::A_WIDTH];
+                cell_bool->setPort(ID::A, inputA);
+
+                cell_bool->parameters[ID::Y_WIDTH]  = 1;
+                cell_bool->setPort(ID::Y, y_bool);
+
+                cell->parameters[ID::A_WIDTH]  = 1;
+                cell->setPort(ID::A, y_bool);
+            }
+
+            if (b_oversized){
+                RTLIL::Cell * cell_bool  = module->addCell(NEW_ID, ID($reduce_bool));
+                RTLIL::Wire * y_bool = module->addWire(NEW_ID, 1);
+
+                cell_bool->parameters[ID::A_SIGNED] = cell->parameters[ID::B_SIGNED];
+                cell_bool->parameters[ID::A_WIDTH]  = cell->parameters[ID::B_WIDTH];
+                cell_bool->setPort(ID::A, inputB);
+
+                cell_bool->parameters[ID::Y_WIDTH]  = 1;
+                cell_bool->setPort(ID::Y, y_bool);
+
+                cell->parameters[ID::B_WIDTH]  = 1;
+                cell->setPort(ID::B, y_bool);
+            }
+
+            if (y_oversized){
+                RTLIL::SigSpec y_lsb;
+                y_lsb = outputY.extract(0, max_width);
+                cell->parameters[ID::Y_WIDTH] = y_lsb.size();
+                cell->setPort(ID::Y, y_lsb);
+
+                outputY.remove(0, max_width);
+                module->connect(outputY, Const(0, GetSize(outputY)));
             }
         }
     }
