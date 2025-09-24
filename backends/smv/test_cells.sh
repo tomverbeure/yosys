@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -ex
 
@@ -7,8 +7,8 @@ mkdir -p test_cells.tmp
 cd test_cells.tmp
 
 # don't test $mul to reduce runtime
-# don't test $div and $mod to reduce runtime and avoid "div by zero" message
-../../../yosys -p 'test_cell -n 5 -w test all /$alu /$fa /$lcu /$lut /$macc /$mul /$div /$mod'
+# don't test $div/$mod/$divfloor/$modfloor to reduce runtime and avoid "div by zero" message
+../../../yosys -p 'test_cell -n 5 -w test all /$alu /$fa /$lcu /$lut /$macc /$mul /$div /$mod /$divfloor /$modfloor'
 
 cat > template.txt << "EOT"
 %module main
@@ -17,11 +17,11 @@ EOT
 
 for fn in test_*.il; do
 	../../../yosys -p "
-		read_ilang $fn
+		read_rtlil $fn
 		rename gold gate
 		synth
 
-		read_ilang $fn
+		read_rtlil $fn
 		miter -equiv -flatten gold gate main
 		hierarchy -top main
 		write_smv -tpl template.txt ${fn#.il}.smv

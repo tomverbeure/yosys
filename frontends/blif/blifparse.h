@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -24,7 +24,7 @@
 
 YOSYS_NAMESPACE_BEGIN
 
-extern void parse_blif(RTLIL::Design *design, std::istream &f, std::string dff_name,
+extern void parse_blif(RTLIL::Design *design, std::istream &f, IdString dff_name,
 		bool run_clean = false, bool sop_mode = false, bool wideports = false);
 
 YOSYS_NAMESPACE_END

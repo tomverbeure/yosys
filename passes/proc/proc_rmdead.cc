@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -28,9 +28,62 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-void proc_rmdead(RTLIL::SwitchRule *sw, int &counter)
+static bool can_use_fully_defined_pool(RTLIL::SwitchRule *sw)
 {
-	BitPatternPool pool(sw->signal);
+	if (!GetSize(sw->signal))
+		return false;
+
+	for (const RTLIL::SigBit &bit : sw->signal)
+		if (bit.wire == NULL)
+			return false;
+
+	for (const RTLIL::CaseRule *cas : sw->cases)
+		for (const RTLIL::SigSpec &sig : cas->compare)
+			if (!sig.is_fully_def())
+				return false;
+
+	return true;
+}
+
+// This replicates the necessary parts of BitPatternPool's interface, but rather
+// than storing remaining patterns, this explicitly stores which fully-defined
+// constants have already been matched.
+struct FullyDefinedPool
+{
+	FullyDefinedPool(const RTLIL::SigSpec &signal)
+		: max_patterns{signal.size() >= 32 ? 0ul : 1ul << signal.size()}
+	{}
+
+	bool take(RTLIL::SigSpec sig)
+	{
+		if (default_reached || patterns.count(sig))
+			return false;
+		patterns.insert(sig);
+		return true;
+	}
+
+	void take_all()
+	{
+		default_reached = true;
+	}
+
+	bool empty()
+	{
+		return default_reached ||
+			(max_patterns && max_patterns == patterns.size());
+	}
+
+	pool<RTLIL::SigSpec> patterns;
+	bool default_reached = false;
+	size_t max_patterns;
+};
+
+void proc_rmdead(RTLIL::SwitchRule *sw, int &counter, int &full_case_counter);
+
+template <class Pool>
+static void proc_rmdead_impl(RTLIL::SwitchRule *sw, int &counter, int &full_case_counter)
+{
+	Pool pool(sw->signal);
 
 	for (size_t i = 0; i < sw->cases.size(); i++)
 	{
@@ -56,16 +109,29 @@ void proc_rmdead(RTLIL::SwitchRule *sw, int &counter)
 		}
 
 		for (auto switch_it : sw->cases[i]->switches)
-			proc_rmdead(switch_it, counter);
+			proc_rmdead(switch_it, counter, full_case_counter);
 
 		if (is_default)
 			pool.take_all();
 	}
+
+	if (pool.empty() && !sw->get_bool_attribute(ID::full_case)) {
+		sw->set_bool_attribute(ID::full_case);
+		full_case_counter++;
+	}
+}
+
+void proc_rmdead(RTLIL::SwitchRule *sw, int &counter, int &full_case_counter)
+{
+	if (can_use_fully_defined_pool(sw))
+		proc_rmdead_impl<FullyDefinedPool>(sw, counter, full_case_counter);
+	else
+		proc_rmdead_impl<BitPatternPool>(sw, counter, full_case_counter);
 }
 
 struct ProcRmdeadPass : public Pass {
 	ProcRmdeadPass() : Pass("proc_rmdead", "eliminate dead trees in decision trees") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -74,25 +140,24 @@ struct ProcRmdeadPass : public Pass {
 		log("This pass identifies unreachable branches in decision trees and removes them.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing PROC_RMDEAD pass (remove dead branches from decision trees).\n");
 
 		extra_args(args, 1, design);
 
 		int total_counter = 0;
-		for (auto mod : design->modules()) {
-			if (!design->selected(mod))
-				continue;
-			for (auto &proc_it : mod->processes) {
-				if (!design->selected(mod, proc_it.second))
-					continue;
-				int counter = 0;
-				for (auto switch_it : proc_it.second->root_case.switches)
-					proc_rmdead(switch_it, counter);
+		for (auto mod : design->all_selected_modules()) {
+			for (auto proc : mod->selected_processes()) {
+				int counter = 0, full_case_counter = 0;
+				for (auto switch_it : proc->root_case.switches)
+					proc_rmdead(switch_it, counter, full_case_counter);
 				if (counter > 0)
 					log("Removed %d dead cases from process %s in module %s.\n", counter,
-							proc_it.first.c_str(), log_id(mod));
+							log_id(proc), log_id(mod));
+				if (full_case_counter > 0)
+					log("Marked %d switch rules as full_case in process %s in module %s.\n",
+							full_case_counter, log_id(proc), log_id(mod));
 				total_counter += counter;
 			}
 		}

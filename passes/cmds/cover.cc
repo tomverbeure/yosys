@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2014  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2014  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -18,6 +18,7 @@
  */
 
 #include "kernel/yosys.h"
+#include "kernel/log_help.h"
 #include <sys/types.h>
 
 #ifndef _WIN32
@@ -26,16 +27,19 @@
 #  include <io.h>
 #endif
 
-#include "kernel/register.h"
-#include "kernel/rtlil.h"
-#include "kernel/log.h"
-
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 struct CoverPass : public Pass {
-	CoverPass() : Pass("cover", "print code coverage counters") { }
-	void help() YS_OVERRIDE
+	CoverPass() : Pass("cover", "print code coverage counters") {
+		internal();
+	}
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -83,7 +87,7 @@ struct CoverPass : public Pass {
 		log("Coverage counters are only available in Yosys for Linux.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::vector<FILE*> out_files;
 		std::vector<std::string> patterns;
@@ -98,28 +102,30 @@ struct CoverPass : public Pass {
 			}
 			if ((args[argidx] == "-o" || args[argidx] == "-a" || args[argidx] == "-d") && argidx+1 < args.size()) {
 				const char *open_mode = args[argidx] == "-a" ? "a+" : "w";
-				std::string filename = args[++argidx];
+				const std::string &filename = args[++argidx];
+				FILE *f = nullptr;
 				if (args[argidx-1] == "-d") {
-			#ifdef _WIN32
-					log_cmd_error("The 'cover -d' option is not supported on win32.\n");
+			#if defined(_WIN32) || defined(__wasm)
+					log_cmd_error("The 'cover -d' option is not supported on this platform.\n");
 			#else
 					char filename_buffer[4096];
 					snprintf(filename_buffer, 4096, "%s/yosys_cover_%d_XXXXXX.txt", filename.c_str(), getpid());
-					filename = mkstemps(filename_buffer, 4);
+					f = fdopen(mkstemps(filename_buffer, 4), "w");
 			#endif
+				} else {
+					f = fopen(filename.c_str(), open_mode);
 				}
-				FILE *f = fopen(filename.c_str(), open_mode);
 				if (f == NULL) {
 					for (auto f : out_files)
 						fclose(f);
-					log_cmd_error("Can't create file %s.\n", args[argidx].c_str());
+					log_cmd_error("Can't create file %s%s.\n", args[argidx-1] == "-d" ? "in directory " : "", args[argidx]);
 				}
 				out_files.push_back(f);
 				continue;
 			}
 			break;
 		}
-		while (argidx < args.size() && args[argidx].substr(0, 1) != "-")
+		while (argidx < args.size() && args[argidx].compare(0, 1, "-") != 0)
 			patterns.push_back(args[argidx++]);
 		extra_args(args, argidx, design);
 
@@ -140,7 +146,7 @@ struct CoverPass : public Pass {
 			for (auto f : out_files)
 				fprintf(f, "%-60s %10d %s\n", it.second.first.c_str(), it.second.second, it.first.c_str());
 			if (do_log)
-				log("%-60s %10d %s\n", it.second.first.c_str(), it.second.second, it.first.c_str());
+				log("%-60s %10d %s\n", it.second.first, it.second.second, it.first);
 		}
 #else
 		for (auto f : out_files)

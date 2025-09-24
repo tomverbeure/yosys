@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -32,12 +32,10 @@
  */
 
 // --------------------------------------------------------
-
-//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
-//-
-//-     $not (A, Y)
-//-
-//- A bit-wise inverter. This corresponds to the Verilog unary prefix '~' operator.
+//* ver 2
+//* title Bit-wise inverter
+//* group unary
+//- This corresponds to the Verilog unary prefix '~' operator.
 //-
 module \$not (A, Y);
 
@@ -58,12 +56,12 @@ endgenerate
 
 endmodule
 
-
 // --------------------------------------------------------
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
 //-     $pos (A, Y)
+//* group unary
 //-
 //- A buffer. This corresponds to the Verilog unary prefix '+' operator.
 //-
@@ -90,7 +88,30 @@ endmodule
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
+//-     $buf (A, Y)
+//* group unary
+//-
+//- A simple coarse-grain buffer cell type for the experimental buffered-normalized
+//- mode. Note this cell does't get removed by 'opt_clean' and is not recommended
+//- for general use.
+//-
+module \$buf (A, Y);
+
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A;
+output [WIDTH-1:0] Y;
+
+assign Y = A;
+
+endmodule
+
+// --------------------------------------------------------
+
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
 //-     $neg (A, Y)
+//* group unary
 //-
 //- An arithmetic inverter. This corresponds to the Verilog unary prefix '-' operator.
 //-
@@ -118,6 +139,7 @@ endmodule
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
 //-     $and (A, B, Y)
+//* group binary
 //-
 //- A bit-wise AND. This corresponds to the Verilog '&' operator.
 //-
@@ -148,6 +170,7 @@ endmodule
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
 //-     $or (A, B, Y)
+//* group binary
 //-
 //- A bit-wise OR. This corresponds to the Verilog '|' operator.
 //-
@@ -178,6 +201,7 @@ endmodule
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
 //-     $xor (A, B, Y)
+//* group binary
 //-
 //- A bit-wise XOR. This corresponds to the Verilog '^' operator.
 //-
@@ -208,6 +232,7 @@ endmodule
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
 //-     $xnor (A, B, Y)
+//* group binary
 //-
 //- A bit-wise XNOR. This corresponds to the Verilog '~^' operator.
 //-
@@ -237,7 +262,8 @@ endmodule
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
-//-     $reduce_and (A, B, Y)
+//-     $reduce_and (A, Y)
+//* group unary
 //-
 //- An AND reduction. This corresponds to the Verilog unary prefix '&' operator.
 //-
@@ -264,7 +290,8 @@ endmodule
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
-//-     $reduce_or (A, B, Y)
+//-     $reduce_or (A, Y)
+//* group unary
 //-
 //- An OR reduction. This corresponds to the Verilog unary prefix '|' operator.
 //-
@@ -291,7 +318,8 @@ endmodule
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
-//-     $reduce_xor (A, B, Y)
+//-     $reduce_xor (A, Y)
+//* group unary
 //-
 //- A XOR reduction. This corresponds to the Verilog unary prefix '^' operator.
 //-
@@ -318,7 +346,8 @@ endmodule
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
-//-     $reduce_xnor (A, B, Y)
+//-     $reduce_xnor (A, Y)
+//* group unary
 //-
 //- A XNOR reduction. This corresponds to the Verilog unary prefix '~^' operator.
 //-
@@ -345,7 +374,8 @@ endmodule
 
 //  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 //-
-//-     $reduce_bool (A, B, Y)
+//-     $reduce_bool (A, Y)
+//* group unary
 //-
 //- An OR reduction. This cell type is used instead of $reduce_or when a signal is
 //- implicitly converted to a boolean signal, e.g. for operands of '&&' and '||'.
@@ -371,6 +401,13 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $shl (A, B, Y)
+//* group binary
+//-
+//- A logical shift-left operation. This corresponds to the Verilog '<<' operator.
+//-
 module \$shl (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -395,6 +432,13 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $shr (A, B, Y)
+//* group binary
+//-
+//- A logical shift-right operation. This corresponds to the Verilog '>>' operator.
+//-
 module \$shr (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -419,6 +463,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $sshl (A, B, Y)
+//* group binary
+//-
+//- An arithmatic shift-left operation. 
+//- This corresponds to the Verilog '<<<' operator.
+//-
 module \$sshl (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -443,6 +495,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $sshr (A, B, Y)
+//* group binary
+//-
+//- An arithmatic shift-right operation.
+//- This corresponds to the Verilog '>>>' operator.
+//-
 module \$sshr (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -466,7 +526,12 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//* ver 2
+//* title Variable shifter
+//* group binary
+//- Performs a right logical shift if the second operand is positive (or
+//- unsigned), and a left logical shift if it is negative.
+//-
 module \$shift (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -480,17 +545,30 @@ input [B_WIDTH-1:0] B;
 output [Y_WIDTH-1:0] Y;
 
 generate
-	if (B_SIGNED) begin:BLOCK1
-		assign Y = $signed(B) < 0 ? A << -B : A >> B;
-	end else begin:BLOCK2
-		assign Y = A >> B;
+	if (A_SIGNED) begin:BLOCK1
+		if (B_SIGNED) begin:BLOCK2
+			assign Y = $signed(B) < 0 ? $signed(A) << -B : $signed(A) >> B;
+		end else begin:BLOCK3
+			assign Y = $signed(A) >> B;
+		end
+	end else begin:BLOCK4
+		if (B_SIGNED) begin:BLOCK5
+			assign Y = $signed(B) < 0 ? A << -B : A >> B;
+		end else begin:BLOCK6
+			assign Y = A >> B;
+		end
 	end
 endgenerate
 
 endmodule
 
 // --------------------------------------------------------
-
+//* ver 2
+//* title Indexed part-select
+//* group binary
+//* tags x-output
+//- Same as the `$shift` cell, but fills with 'x'.
+//-
 module \$shiftx (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -515,7 +593,7 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//* group arith
 module \$fa (A, B, C, X, Y);
 
 parameter WIDTH = 1;
@@ -531,15 +609,28 @@ assign Y = t1 ^ C, X = (t2 | t3) ^ (Y ^ Y);
 endmodule
 
 // --------------------------------------------------------
+//* group arith
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $lcu (P, G, CI, CO)
+//-
+//- Lookahead carry unit
+//- A building block dedicated to fast computation of carry-bits used in binary
+//- arithmetic operations. By replacing the ripple carry structure used in full-adder
+//- blocks, the more significant  bits of the sum can be expected to be computed more
+//- quickly.
+//- Typically created during `techmap` of $alu cells (see the "_90_alu" rule in
+//- +/techmap.v).
 module \$lcu (P, G, CI, CO);
 
 parameter WIDTH = 1;
 
-input [WIDTH-1:0] P, G;
-input CI;
+input [WIDTH-1:0] P;    // Propagate
+input [WIDTH-1:0] G;    // Generate
+input CI;               // Carry-in
 
-output reg [WIDTH-1:0] CO;
+output reg [WIDTH-1:0] CO; // Carry-out
 
 integer i;
 always @* begin
@@ -554,7 +645,15 @@ end
 endmodule
 
 // --------------------------------------------------------
-
+//* ver 2
+//* title Arithmetic logic unit
+//* group arith
+//- A building block supporting both binary addition/subtraction operations, and
+//- indirectly, comparison operations.
+//- Typically created by the `alumacc` pass, which transforms:
+//- `$add`, `$sub`, `$lt`, `$le`, `$ge`, `$gt`, `$eq`, `$eqx`, `$ne`, `$nex`
+//- cells into this `$alu` cell.
+//-
 module \$alu (A, B, CI, BI, X, Y, CO);
 
 parameter A_SIGNED = 0;
@@ -563,12 +662,16 @@ parameter A_WIDTH = 1;
 parameter B_WIDTH = 1;
 parameter Y_WIDTH = 1;
 
-input [A_WIDTH-1:0] A;
-input [B_WIDTH-1:0] B;
-output [Y_WIDTH-1:0] X, Y;
+input [A_WIDTH-1:0] A;      // Input operand
+input [B_WIDTH-1:0] B;      // Input operand
+output [Y_WIDTH-1:0] X;     // A xor B (sign-extended, optional B inversion,
+                            //          used in combination with
+                            //          reduction-AND for $eq/$ne ops)
+output [Y_WIDTH-1:0] Y;     // Sum
 
-input CI, BI;
-output [Y_WIDTH-1:0] CO;
+input CI;                   // Carry-in (set for $sub)
+input BI;                   // Invert-B (set for $sub)
+output [Y_WIDTH-1:0] CO;    // Carry-out
 
 wire [Y_WIDTH-1:0] AA, BB;
 
@@ -584,6 +687,7 @@ endgenerate
 wire y_co_undef = ^{A, A, B, B, CI, CI, BI, BI};
 
 assign X = AA ^ BB;
+// Full adder
 assign Y = (AA + BB + CI) ^ {Y_WIDTH{y_co_undef}};
 
 function get_carry;
@@ -603,6 +707,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $lt (A, B, Y)
+//* group binary
+//-
+//- A less-than comparison between inputs 'A' and 'B'. 
+//- This corresponds to the Verilog '<' operator.
+//-
 module \$lt (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -627,6 +739,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $le (A, B, Y)
+//* group binary
+//-
+//- A less-than-or-equal-to comparison between inputs 'A' and 'B'. 
+//- This corresponds to the Verilog '<=' operator.
+//-
 module \$le (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -651,6 +771,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $eq (A, B, Y)
+//* group binary
+//-
+//- An equality comparison between inputs 'A' and 'B'. 
+//- This corresponds to the Verilog '==' operator.
+//-
 module \$eq (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -675,6 +803,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $ne (A, B, Y)
+//* group binary
+//-
+//- An inequality comparison between inputs 'A' and 'B'. 
+//- This corresponds to the Verilog '!=' operator.
+//-
 module \$ne (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -698,7 +834,16 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//* ver 2
+//* title Case equality
+//* group binary
+//* tags x-aware
+//- An exact equality comparison between inputs 'A' and 'B'. Also known as the
+//- case equality operator. This corresponds to the Verilog '===' operator.
+//- Unlike equality comparison that can give 'x' as output, an exact equality
+//- comparison will strictly give '0' or '1' as output, even if input includes
+//- 'x' or 'z' values.
+//-
 module \$eqx (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -722,7 +867,14 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//* ver 2
+//* title Case inequality
+//* group binary
+//* tags x-aware
+//- This corresponds to the Verilog '!==' operator.
+//-
+//- Refer to `$eqx` for more details.
+//-
 module \$nex (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -747,6 +899,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $ge (A, B, Y)
+//* group binary
+//-
+//- A greater-than-or-equal-to comparison between inputs 'A' and 'B'.
+//- This corresponds to the Verilog '>=' operator.
+//-
 module \$ge (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -771,6 +931,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $gt (A, B, Y)
+//* group binary
+//-
+//- A greater-than comparison between inputs 'A' and 'B'. 
+//- This corresponds to the Verilog '>' operator.
+//-
 module \$gt (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -795,6 +963,13 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $add (A, B, Y)
+//* group binary
+//-
+//-  Addition of inputs 'A' and 'B'. This corresponds to the Verilog '+' operator.
+//-
 module \$add (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -819,6 +994,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $sub (A, B, Y)
+//* group binary
+//-
+//- Subtraction between inputs 'A' and 'B'.
+//- This corresponds to the Verilog '-' operator.
+//-
 module \$sub (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -843,6 +1026,14 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $mul (A, B, Y)
+//* group binary
+//-
+//- Multiplication of inputs 'A' and 'B'.
+//- This corresponds to the Verilog '*' operator.
+//-
 module \$mul (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -866,18 +1057,35 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $macc (A, B, Y)
+//* group arith
+//-
+//- Multiply and accumulate.
+//- A building block for summing any number of negated and unnegated signals
+//- and arithmetic products of pairs of signals. Cell port A concatenates pairs
+//- of signals to be multiplied together. When the second signal in a pair is zero
+//- length, a constant 1 is used instead as the second factor. Cell port B
+//- concatenates 1-bit-wide signals to also be summed, such as "carry in" in adders.
+//- Typically created by the `alumacc` pass, which transforms $add and $mul
+//- into $macc cells.
 module \$macc (A, B, Y);
 
 parameter A_WIDTH = 0;
 parameter B_WIDTH = 0;
 parameter Y_WIDTH = 0;
+// CONFIG determines the layout of A, as explained below
 parameter CONFIG = 4'b0000;
 parameter CONFIG_WIDTH = 4;
 
-input [A_WIDTH-1:0] A;
-input [B_WIDTH-1:0] B;
-output reg [Y_WIDTH-1:0] Y;
+// In the terms used for this cell, there's mixed meanings for the term "port". To disambiguate:
+// A cell port is for example the A input (it is constructed in C++ as cell->setPort(ID::A, ...))
+// Multiplier ports are pairs of multiplier inputs ("factors").
+// If the second signal in such a pair is zero length, no multiplication is necessary, and the first signal is just added to the sum.
+input [A_WIDTH-1:0] A; // Cell port A is the concatenation of all arithmetic ports
+input [B_WIDTH-1:0] B; // Cell port B is the concatenation of single-bit unsigned signals to be also added to the sum
+output reg [Y_WIDTH-1:0] Y; // Output sum
 
 // Xilinx XSIM does not like $clog2() below..
 function integer my_clog2;
@@ -893,9 +1101,41 @@ function integer my_clog2;
 	end
 endfunction
 
+// Bits that a factor's length field in CONFIG per factor in cell port A
 localparam integer num_bits = CONFIG[3:0] > 0 ? CONFIG[3:0] : 1;
+// Number of multiplier ports
 localparam integer num_ports = (CONFIG_WIDTH-4) / (2 + 2*num_bits);
+// Minium bit width of an induction variable to iterate over all bits of cell port A
 localparam integer num_abits = my_clog2(A_WIDTH) > 0 ? my_clog2(A_WIDTH) : 1;
+
+// In this pseudocode, u(foo) means an unsigned int that's foo bits long.
+// The CONFIG parameter carries the following information:
+//	struct CONFIG {
+//		u4 num_bits;
+//		struct port_field {
+//			bool is_signed;
+//			bool is_subtract;
+//			u(num_bits) factor1_len;
+//			u(num_bits) factor2_len;
+//		}[num_ports];
+//	};
+
+// The A cell port carries the following information:
+//	struct A {
+//		u(CONFIG.port_field[0].factor1_len) port0factor1;
+//		u(CONFIG.port_field[0].factor2_len) port0factor2;
+//		u(CONFIG.port_field[1].factor1_len) port1factor1;
+//		u(CONFIG.port_field[1].factor2_len) port1factor2;
+//		...
+//	};
+// and log(sizeof(A)) is num_abits.
+// No factor1 may have a zero length.
+// A factor2 having a zero length implies factor2 is replaced with a constant 1.
+
+// Additionally, B is an array of 1-bit-wide unsigned integers to also be summed up.
+// Finally, we have:
+// Y = port0factor1 * port0factor2 + port1factor1 * port1factor2 + ...
+//     * B[0] + B[1] + ...
 
 function [2*num_ports*num_abits-1:0] get_port_offsets;
 	input [CONFIG_WIDTH-1:0] cfg;
@@ -968,7 +1208,127 @@ end
 endmodule
 
 // --------------------------------------------------------
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $macc_v2 (A, B, C, Y)
+//* group arith
+//-
+//- Multiply and add.
+//- This cell represents a generic fused multiply-add operation, it supersedes the
+//- earlier $macc cell.
+//-
+module \$macc_v2 (A, B, C, Y);
 
+parameter NPRODUCTS = 0;
+parameter NADDENDS = 0;
+parameter A_WIDTHS = 16'h0000;
+parameter B_WIDTHS = 16'h0000;
+parameter C_WIDTHS = 16'h0000;
+parameter Y_WIDTH = 0;
+
+parameter PRODUCT_NEGATED = 1'bx;
+parameter ADDEND_NEGATED = 1'bx;
+parameter A_SIGNED = 1'bx;
+parameter B_SIGNED = 1'bx;
+parameter C_SIGNED = 1'bx;
+
+function integer sum_widths1;
+	input [(16*NPRODUCTS)-1:0] widths;
+	integer i;
+	begin
+		sum_widths1 = 0;
+		for (i = 0; i < NPRODUCTS; i++) begin
+			sum_widths1 = sum_widths1 + widths[16*i+:16];
+		end
+	end
+endfunction
+
+function integer sum_widths2;
+	input [(16*NADDENDS)-1:0] widths;
+	integer i;
+	begin
+		sum_widths2 = 0;
+		for (i = 0; i < NADDENDS; i++) begin
+			sum_widths2 = sum_widths2 + widths[16*i+:16];
+		end
+	end
+endfunction
+
+input [sum_widths1(A_WIDTHS)-1:0] A; // concatenation of LHS factors
+input [sum_widths1(B_WIDTHS)-1:0] B; // concatenation of RHS factors
+input [sum_widths2(C_WIDTHS)-1:0] C; // concatenation of summands
+output reg [Y_WIDTH-1:0] Y; // output sum
+
+integer i, j, ai, bi, ci, aw, bw, cw;
+reg [Y_WIDTH-1:0] product;
+reg [Y_WIDTH-1:0] addend, oper_a, oper_b;
+
+always @* begin
+	Y = 0;
+	ai = 0;
+	bi = 0;
+	for (i = 0; i < NPRODUCTS; i = i+1)
+	begin
+		aw = A_WIDTHS[16*i+:16];
+		bw = B_WIDTHS[16*i+:16];
+
+		oper_a = 0;
+		oper_b = 0;
+		for (j = 0; j < Y_WIDTH && j < aw; j = j + 1)
+			oper_a[j] = A[ai + j];
+		for (j = 0; j < Y_WIDTH && j < bw; j = j + 1)
+			oper_b[j] = B[bi + j];
+		// A_SIGNED[i] == B_SIGNED[i] as RTLIL invariant
+		if (A_SIGNED[i] && B_SIGNED[i]) begin
+			for (j = aw; j > 0 && j < Y_WIDTH; j = j + 1)
+				oper_a[j] = oper_a[j - 1];
+			for (j = bw; j > 0 && j < Y_WIDTH; j = j + 1)
+				oper_b[j] = oper_b[j - 1];
+		end
+
+		product = oper_a * oper_b;
+
+		if (PRODUCT_NEGATED[i])
+			Y = Y - product;
+		else
+			Y = Y + product;
+
+		ai = ai + aw;
+		bi = bi + bw;
+	end
+
+	ci = 0;
+	for (i = 0; i < NADDENDS; i = i+1)
+	begin
+		cw = C_WIDTHS[16*i+:16];
+
+		addend = 0;
+		for (j = 0; j < Y_WIDTH && j < cw; j = j + 1)
+			addend[j] = C[ci + j];
+		if (C_SIGNED[i]) begin
+			for (j = cw; j > 0 && j < Y_WIDTH; j = j + 1)
+				addend[j] = addend[j - 1];
+		end
+
+		if (ADDEND_NEGATED[i])
+			Y = Y - addend;
+		else
+			Y = Y + addend;
+
+		ci = ci + cw;
+	end
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* ver 2
+//* title Divider
+//* group binary
+//* tags x-output
+//- This corresponds to the Verilog '/' operator, performing division and
+//- truncating the result (rounding towards 0).
+//-
 module \$div (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -992,7 +1352,15 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//* ver 2
+//* title Modulo
+//* group binary
+//* tags x-output
+//- This corresponds to the Verilog '%' operator, giving the module (or
+//- remainder) of division and truncating the result (rounding towards 0).
+//-
+//- Invariant: $div(A, B) * B + $mod(A, B) == A
+//-
 module \$mod (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -1016,6 +1384,94 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
+
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $divfloor (A, B, Y)
+//* group binary
+//-
+//- Division with floored result (rounded towards negative infinity).
+//-
+module \$divfloor (A, B, Y);
+
+parameter A_SIGNED = 0;
+parameter B_SIGNED = 0;
+parameter A_WIDTH = 0;
+parameter B_WIDTH = 0;
+parameter Y_WIDTH = 0;
+
+input [A_WIDTH-1:0] A;
+input [B_WIDTH-1:0] B;
+output [Y_WIDTH-1:0] Y;
+
+generate
+	if (A_SIGNED && B_SIGNED) begin:BLOCK1
+		localparam WIDTH =
+				A_WIDTH >= B_WIDTH && A_WIDTH >= Y_WIDTH ? A_WIDTH :
+				B_WIDTH >= A_WIDTH && B_WIDTH >= Y_WIDTH ? B_WIDTH : Y_WIDTH;
+		wire [WIDTH:0] A_buf, B_buf, N_buf;
+		assign A_buf = $signed(A);
+		assign B_buf = $signed(B);
+		assign N_buf = (A[A_WIDTH-1] == B[B_WIDTH-1]) || A == 0 ? A_buf : $signed(A_buf - (B[B_WIDTH-1] ? B_buf+1 : B_buf-1));
+		assign Y = $signed(N_buf) / $signed(B_buf);
+	end else begin:BLOCK2
+		assign Y = A / B;
+	end
+endgenerate
+
+endmodule
+
+// --------------------------------------------------------
+
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $modfloor (A, B, Y)
+//* group binary
+//-
+//- Modulo/remainder of division with floored result (rounded towards negative infinity).
+//-
+//- Invariant: $divfloor(A, B) * B + $modfloor(A, B) == A
+//-
+module \$modfloor (A, B, Y);
+
+parameter A_SIGNED = 0;
+parameter B_SIGNED = 0;
+parameter A_WIDTH = 0;
+parameter B_WIDTH = 0;
+parameter Y_WIDTH = 0;
+
+input [A_WIDTH-1:0] A;
+input [B_WIDTH-1:0] B;
+output [Y_WIDTH-1:0] Y;
+
+generate
+	if (A_SIGNED && B_SIGNED) begin:BLOCK1
+		localparam WIDTH = B_WIDTH >= Y_WIDTH ? B_WIDTH : Y_WIDTH;
+		wire [WIDTH-1:0] B_buf, Y_trunc;
+		assign B_buf = $signed(B);
+		assign Y_trunc = $signed(A) % $signed(B);
+		// flooring mod is the same as truncating mod for positive division results (A and B have
+		// the same sign), as well as when there's no remainder.
+		// For all other cases, they behave as `floor - trunc = B`
+		assign Y = (A[A_WIDTH-1] == B[B_WIDTH-1]) || Y_trunc == 0 ? Y_trunc : $signed(B_buf) + $signed(Y_trunc);
+	end else begin:BLOCK2
+		// no difference between truncating and flooring for unsigned
+		assign Y = A % B;
+	end
+endgenerate
+
+endmodule
+
+// --------------------------------------------------------
+
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $pow (A, B, Y)
+//* group binary
+//-
+//- Exponentiation of an input (Y = A ** B). 
+//- This corresponds to the Verilog '**' operator.
+//-
 `ifndef SIMLIB_NOPOW
 
 module \$pow (A, B, Y);
@@ -1047,6 +1503,13 @@ endmodule
 `endif
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $logic_not (A, Y)
+//* group unary
+//-
+//- A logical inverter. This corresponds to the Verilog unary prefix '!' operator.
+//-
 module \$logic_not (A, Y);
 
 parameter A_SIGNED = 0;
@@ -1068,6 +1531,13 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $logic_and (A, B, Y)
+//* group binary
+//-
+//- A logical AND. This corresponds to the Verilog '&&' operator.
+//-
 module \$logic_and (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -1092,6 +1562,13 @@ endmodule
 
 // --------------------------------------------------------
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $logic_or (A, B, Y)
+//* group binary
+//-
+//- A logical OR. This corresponds to the Verilog '||' operator.
+//-
 module \$logic_or (A, B, Y);
 
 parameter A_SIGNED = 0;
@@ -1115,7 +1592,7 @@ endgenerate
 endmodule
 
 // --------------------------------------------------------
-
+//* group wire
 module \$slice (A, Y);
 
 parameter OFFSET = 0;
@@ -1130,7 +1607,13 @@ assign Y = A >> OFFSET;
 endmodule
 
 // --------------------------------------------------------
-
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $concat (A, B, Y)
+//* group wire
+//-
+//- Concatenation of inputs into a single output ( Y = {B, A} ).
+//-
 module \$concat (A, B, Y);
 
 parameter A_WIDTH = 0;
@@ -1145,26 +1628,66 @@ assign Y = {B, A};
 endmodule
 
 // --------------------------------------------------------
+//* group mux
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $mux (A, B, S, Y)
+//-
+//- Multiplexer i.e selecting between two inputs based on select signal.
+//-
 module \$mux (A, B, S, Y);
 
 parameter WIDTH = 0;
 
 input [WIDTH-1:0] A, B;
 input S;
-output reg [WIDTH-1:0] Y;
+output [WIDTH-1:0] Y;
 
-always @* begin
-	if (S)
-		Y = B;
-	else
-		Y = A;
-end
+assign Y = S ? B : A;
 
 endmodule
 
 // --------------------------------------------------------
+//* ver 2
+//* title Binary-encoded multiplexer
+//* group mux
+//- Selects between 'slices' of A where each value of S corresponds to a unique
+//- slice.
+//-
+module \$bmux (A, S, Y);
 
+parameter WIDTH = 0;
+parameter S_WIDTH = 0;
+
+input [(WIDTH << S_WIDTH)-1:0] A;
+input [S_WIDTH-1:0] S;
+output [WIDTH-1:0] Y;
+
+wire [WIDTH-1:0] bm0_out, bm1_out;
+
+generate
+	if (S_WIDTH > 1) begin:muxlogic
+		\$bmux #(.WIDTH(WIDTH), .S_WIDTH(S_WIDTH-1)) bm0 (.A(A[(WIDTH << (S_WIDTH - 1))-1:0]), .S(S[S_WIDTH-2:0]), .Y(bm0_out));
+		\$bmux #(.WIDTH(WIDTH), .S_WIDTH(S_WIDTH-1)) bm1 (.A(A[(WIDTH << S_WIDTH)-1:WIDTH << (S_WIDTH - 1)]), .S(S[S_WIDTH-2:0]), .Y(bm1_out));
+		assign Y = S[S_WIDTH-1] ? bm1_out : bm0_out;
+	end else if (S_WIDTH == 1) begin:simple
+		assign Y = S ? A[2*WIDTH-1:WIDTH] : A[WIDTH-1:0];
+	end else begin:passthru
+		assign Y = A;
+	end
+endgenerate
+
+endmodule
+
+// --------------------------------------------------------
+//* ver 2
+//* title Priority-encoded multiplexer
+//* group mux
+//* tags x-output
+//- Selects between 'slices' of B where each slice corresponds to a single bit
+//- of S. Outputs A when all bits of S are low.
+//-
 module \$pmux (A, B, S, Y);
 
 parameter WIDTH = 0;
@@ -1182,16 +1705,52 @@ always @* begin
 	Y = A;
 	found_active_sel_bit = 0;
 	for (i = 0; i < S_WIDTH; i = i+1)
-		if (S[i]) begin
-			Y = found_active_sel_bit ? 'bx : B >> (WIDTH*i);
-			found_active_sel_bit = 1;
-		end
+		case (S[i])
+			1'b1: begin
+				Y = found_active_sel_bit ? 'bx : B >> (WIDTH*i);
+				found_active_sel_bit = 1;
+			end
+			1'b0: ;
+			1'bx: begin
+				Y = 'bx;
+				found_active_sel_bit = 'bx;
+			end
+		endcase
 end
 
 endmodule
 
 // --------------------------------------------------------
+//* group mux
+
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $demux (A, S, Y)
+//-
+//- Demultiplexer i.e routing single input to several outputs based on select signal.
+//- Unselected outputs are driven to zero.
+//-
+module \$demux (A, S, Y);
+
+parameter WIDTH = 1;
+parameter S_WIDTH = 1;
+
+input [WIDTH-1:0] A;
+input [S_WIDTH-1:0] S;
+output [(WIDTH << S_WIDTH)-1:0] Y;
+
+genvar i;
+generate
+	for (i = 0; i < (1 << S_WIDTH); i = i + 1) begin:slices
+		assign Y[i*WIDTH+:WIDTH] = (S == i) ? A : 0;
+	end
+endgenerate
+
+endmodule
+
+// --------------------------------------------------------
 `ifndef SIMLIB_NOLUT
+//* group logic
 
 module \$lut (A, Y);
 
@@ -1199,35 +1758,15 @@ parameter WIDTH = 0;
 parameter LUT = 0;
 
 input [WIDTH-1:0] A;
-output reg Y;
+output Y;
 
-wire lut0_out, lut1_out;
-
-generate
-	if (WIDTH <= 1) begin:simple
-		assign {lut1_out, lut0_out} = LUT;
-	end else begin:complex
-		\$lut #( .WIDTH(WIDTH-1), .LUT(LUT                  ) ) lut0 ( .A(A[WIDTH-2:0]), .Y(lut0_out) );
-		\$lut #( .WIDTH(WIDTH-1), .LUT(LUT >> (2**(WIDTH-1))) ) lut1 ( .A(A[WIDTH-2:0]), .Y(lut1_out) );
-	end
-
-	if (WIDTH > 0) begin:lutlogic
-		always @* begin
-			casez ({A[WIDTH-1], lut0_out, lut1_out})
-				3'b?11: Y = 1'b1;
-				3'b?00: Y = 1'b0;
-				3'b0??: Y = lut0_out;
-				3'b1??: Y = lut1_out;
-				default: Y = 1'bx;
-			endcase
-		end
-	end
-endgenerate
+\$bmux #(.WIDTH(1), .S_WIDTH(WIDTH)) mux(.A(LUT[(1<<WIDTH)-1:0]), .S(A), .Y(Y));
 
 endmodule
 
 `endif
 // --------------------------------------------------------
+//* group logic
 
 module \$sop (A, Y);
 
@@ -1256,7 +1795,16 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group mux
 
+//  |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+//-
+//-     $tribuf (A, EN, Y)
+//-
+//- A tri-state buffer. 
+//- This buffer conditionally drives the output with the value of the input
+//- based on the enable signal.
+//-
 module \$tribuf (A, EN, Y);
 
 parameter WIDTH = 0;
@@ -1270,6 +1818,231 @@ assign Y = EN ? A : 'bz;
 endmodule
 
 // --------------------------------------------------------
+//* group spec
+
+module \$specify2 (EN, SRC, DST);
+
+parameter FULL = 0;
+parameter SRC_WIDTH = 1;
+parameter DST_WIDTH = 1;
+
+parameter SRC_DST_PEN = 0;
+parameter SRC_DST_POL = 0;
+
+parameter T_RISE_MIN = 0;
+parameter T_RISE_TYP = 0;
+parameter T_RISE_MAX = 0;
+
+parameter T_FALL_MIN = 0;
+parameter T_FALL_TYP = 0;
+parameter T_FALL_MAX = 0;
+
+input EN;
+input [SRC_WIDTH-1:0] SRC;
+input [DST_WIDTH-1:0] DST;
+
+localparam SD = SRC_DST_PEN ? (SRC_DST_POL ? 1 : 2) : 0;
+
+`ifdef SIMLIB_SPECIFY
+specify
+	if (EN && SD==0 && !FULL) (SRC  => DST) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && SD==0 &&  FULL) (SRC  *> DST) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && SD==1 && !FULL) (SRC +=> DST) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && SD==1 &&  FULL) (SRC +*> DST) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && SD==2 && !FULL) (SRC -=> DST) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && SD==2 &&  FULL) (SRC -*> DST) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+endspecify
+`endif
+
+endmodule
+
+// --------------------------------------------------------
+//* group spec
+
+module \$specify3 (EN, SRC, DST, DAT);
+
+parameter FULL = 0;
+parameter SRC_WIDTH = 1;
+parameter DST_WIDTH = 1;
+
+parameter EDGE_EN = 0;
+parameter EDGE_POL = 0;
+
+parameter SRC_DST_PEN = 0;
+parameter SRC_DST_POL = 0;
+
+parameter DAT_DST_PEN = 0;
+parameter DAT_DST_POL = 0;
+
+parameter T_RISE_MIN = 0;
+parameter T_RISE_TYP = 0;
+parameter T_RISE_MAX = 0;
+
+parameter T_FALL_MIN = 0;
+parameter T_FALL_TYP = 0;
+parameter T_FALL_MAX = 0;
+
+input EN;
+input [SRC_WIDTH-1:0] SRC;
+input [DST_WIDTH-1:0] DST, DAT;
+
+localparam ED = EDGE_EN     ? (EDGE_POL    ? 1 : 2) : 0;
+localparam SD = SRC_DST_PEN ? (SRC_DST_POL ? 1 : 2) : 0;
+localparam DD = DAT_DST_PEN ? (DAT_DST_POL ? 1 : 2) : 0;
+
+`ifdef SIMLIB_SPECIFY
+specify
+	// DD=0
+
+	if (EN && DD==0 && SD==0 && ED==0 && !FULL) (        SRC  => (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==0 && ED==0 &&  FULL) (        SRC  *> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==0 && ED==1 && !FULL) (posedge SRC  => (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==0 && ED==1 &&  FULL) (posedge SRC  *> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==0 && ED==2 && !FULL) (negedge SRC  => (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==0 && ED==2 &&  FULL) (negedge SRC  *> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	if (EN && DD==0 && SD==1 && ED==0 && !FULL) (        SRC +=> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==1 && ED==0 &&  FULL) (        SRC +*> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==1 && ED==1 && !FULL) (posedge SRC +=> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==1 && ED==1 &&  FULL) (posedge SRC +*> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==1 && ED==2 && !FULL) (negedge SRC +=> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==1 && ED==2 &&  FULL) (negedge SRC +*> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	if (EN && DD==0 && SD==2 && ED==0 && !FULL) (        SRC -=> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==2 && ED==0 &&  FULL) (        SRC -*> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==2 && ED==1 && !FULL) (posedge SRC -=> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==2 && ED==1 &&  FULL) (posedge SRC -*> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==2 && ED==2 && !FULL) (negedge SRC -=> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==0 && SD==2 && ED==2 &&  FULL) (negedge SRC -*> (DST  : DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	// DD=1
+
+	if (EN && DD==1 && SD==0 && ED==0 && !FULL) (        SRC  => (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==0 && ED==0 &&  FULL) (        SRC  *> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==0 && ED==1 && !FULL) (posedge SRC  => (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==0 && ED==1 &&  FULL) (posedge SRC  *> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==0 && ED==2 && !FULL) (negedge SRC  => (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==0 && ED==2 &&  FULL) (negedge SRC  *> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	if (EN && DD==1 && SD==1 && ED==0 && !FULL) (        SRC +=> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==1 && ED==0 &&  FULL) (        SRC +*> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==1 && ED==1 && !FULL) (posedge SRC +=> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==1 && ED==1 &&  FULL) (posedge SRC +*> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==1 && ED==2 && !FULL) (negedge SRC +=> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==1 && ED==2 &&  FULL) (negedge SRC +*> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	if (EN && DD==1 && SD==2 && ED==0 && !FULL) (        SRC -=> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==2 && ED==0 &&  FULL) (        SRC -*> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==2 && ED==1 && !FULL) (posedge SRC -=> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==2 && ED==1 &&  FULL) (posedge SRC -*> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==2 && ED==2 && !FULL) (negedge SRC -=> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==1 && SD==2 && ED==2 &&  FULL) (negedge SRC -*> (DST +: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	// DD=2
+
+	if (EN && DD==2 && SD==0 && ED==0 && !FULL) (        SRC  => (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==0 && ED==0 &&  FULL) (        SRC  *> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==0 && ED==1 && !FULL) (posedge SRC  => (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==0 && ED==1 &&  FULL) (posedge SRC  *> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==0 && ED==2 && !FULL) (negedge SRC  => (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==0 && ED==2 &&  FULL) (negedge SRC  *> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	if (EN && DD==2 && SD==1 && ED==0 && !FULL) (        SRC +=> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==1 && ED==0 &&  FULL) (        SRC +*> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==1 && ED==1 && !FULL) (posedge SRC +=> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==1 && ED==1 &&  FULL) (posedge SRC +*> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==1 && ED==2 && !FULL) (negedge SRC +=> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==1 && ED==2 &&  FULL) (negedge SRC +*> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+
+	if (EN && DD==2 && SD==2 && ED==0 && !FULL) (        SRC -=> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==2 && ED==0 &&  FULL) (        SRC -*> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==2 && ED==1 && !FULL) (posedge SRC -=> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==2 && ED==1 &&  FULL) (posedge SRC -*> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==2 && ED==2 && !FULL) (negedge SRC -=> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+	if (EN && DD==2 && SD==2 && ED==2 &&  FULL) (negedge SRC -*> (DST -: DAT)) = (T_RISE_MIN:T_RISE_TYP:T_RISE_MAX, T_FALL_MIN:T_FALL_TYP:T_FALL_MAX);
+endspecify
+`endif
+
+endmodule
+
+// --------------------------------------------------------
+//* group spec
+
+module \$specrule (EN_SRC, EN_DST, SRC, DST);
+
+parameter TYPE = "";
+parameter T_LIMIT = 0;
+parameter T_LIMIT2 = 0;
+
+parameter SRC_WIDTH = 1;
+parameter DST_WIDTH = 1;
+
+parameter SRC_PEN = 0;
+parameter SRC_POL = 0;
+
+parameter DST_PEN = 0;
+parameter DST_POL = 0;
+
+input EN_SRC, EN_DST;
+input [SRC_WIDTH-1:0] SRC;
+input [DST_WIDTH-1:0] DST;
+
+`ifdef SIMLIB_SPECIFY
+specify
+	// TBD
+endspecify
+`endif
+
+endmodule
+
+// --------------------------------------------------------
+//* ver 2
+//* title Bit-wise case equality
+//* group binary
+//* tags x-aware
+//- A bit-wise version of `$eqx`.
+//-
+module \$bweqx (A, B, Y);
+
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A, B;
+output [WIDTH-1:0] Y;
+
+genvar i;
+generate
+	for (i = 0; i < WIDTH; i = i + 1) begin:slices
+		assign Y[i] = A[i] === B[i];
+	end
+endgenerate
+
+endmodule
+
+// --------------------------------------------------------
+//* ver 2
+//* title Bit-wise multiplexer
+//* group mux
+//- Equivalent to a series of 1-bit wide `$mux` cells.
+//-
+module \$bwmux (A, B, S, Y);
+
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A, B;
+input [WIDTH-1:0] S;
+output [WIDTH-1:0] Y;
+
+genvar i;
+generate
+	for (i = 0; i < WIDTH; i = i + 1) begin:slices
+		assign Y[i] = S[i] ? B[i] : A[i];
+	end
+endgenerate
+
+endmodule
+
+// --------------------------------------------------------
+//* group formal
 
 module \$assert (A, EN);
 
@@ -1287,6 +2060,7 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$assume (A, EN);
 
@@ -1304,6 +2078,7 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$live (A, EN);
 
@@ -1312,6 +2087,7 @@ input A, EN;
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$fair (A, EN);
 
@@ -1320,6 +2096,7 @@ input A, EN;
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$cover (A, EN);
 
@@ -1328,6 +2105,7 @@ input A, EN;
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$initstate (Y);
 
@@ -1345,6 +2123,7 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$anyconst (Y);
 
@@ -1357,6 +2136,7 @@ assign Y = 'bx;
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$anyseq (Y);
 
@@ -1369,6 +2149,28 @@ assign Y = 'bx;
 endmodule
 
 // --------------------------------------------------------
+`ifdef SIMLIB_FF
+`ifndef SIMLIB_GLOBAL_CLOCK
+`define SIMLIB_GLOBAL_CLOCK $global_clk
+`endif
+//* group formal
+module \$anyinit (D, Q);
+
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+
+initial Q <= 'bx;
+
+always @(`SIMLIB_GLOBAL_CLOCK) begin
+	Q <= D;
+end
+
+endmodule
+`endif
+// --------------------------------------------------------
+//* group formal
 
 module \$allconst (Y);
 
@@ -1381,6 +2183,7 @@ assign Y = 'bx;
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$allseq (Y);
 
@@ -1393,6 +2196,7 @@ assign Y = 'bx;
 endmodule
 
 // --------------------------------------------------------
+//* group formal
 
 module \$equiv (A, B, Y);
 
@@ -1413,7 +2217,50 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group debug
+
+module \$print (EN, TRG, ARGS);
+
+parameter PRIORITY = 0;
+
+parameter FORMAT = "";
+parameter signed ARGS_WIDTH = 0;
+
+parameter TRG_ENABLE = 1;
+parameter signed TRG_WIDTH = 0;
+parameter TRG_POLARITY = 0;
+
+input EN;
+input [TRG_WIDTH-1:0] TRG;
+input [ARGS_WIDTH-1:0] ARGS;
+
+endmodule
+
+// --------------------------------------------------------
+//* group debug
+
+module \$check (A, EN, TRG, ARGS);
+
+parameter FLAVOR = "";
+parameter PRIORITY = 0;
+
+parameter FORMAT = "";
+parameter ARGS_WIDTH = 0;
+
+parameter TRG_ENABLE = 1;
+parameter TRG_WIDTH = 0;
+parameter TRG_POLARITY = 0;
+
+input A;
+input EN;
+input [TRG_WIDTH-1:0] TRG;
+input [ARGS_WIDTH-1:0] ARGS;
+
+endmodule
+
+// --------------------------------------------------------
 `ifndef SIMLIB_NOSR
+//* group reg
 
 module \$sr (SET, CLR, Q);
 
@@ -1430,7 +2277,7 @@ wire [WIDTH-1:0] pos_clr = CLR_POLARITY ? CLR : ~CLR;
 genvar i;
 generate
 	for (i = 0; i < WIDTH; i = i+1) begin:bitslices
-		always @(posedge pos_set[i], posedge pos_clr[i])
+		always @*
 			if (pos_clr[i])
 				Q[i] <= 0;
 			else if (pos_set[i])
@@ -1443,6 +2290,10 @@ endmodule
 `endif
 // --------------------------------------------------------
 `ifdef SIMLIB_FF
+`ifndef SIMLIB_GLOBAL_CLOCK
+`define SIMLIB_GLOBAL_CLOCK $global_clk
+`endif
+//* group formal
 
 module \$ff (D, Q);
 
@@ -1451,7 +2302,7 @@ parameter WIDTH = 0;
 input [WIDTH-1:0] D;
 output reg [WIDTH-1:0] Q;
 
-always @($global_clk) begin
+always @(`SIMLIB_GLOBAL_CLOCK) begin
 	Q <= D;
 end
 
@@ -1459,6 +2310,7 @@ endmodule
 
 `endif
 // --------------------------------------------------------
+//* group reg
 
 module \$dff (CLK, D, Q);
 
@@ -1477,6 +2329,7 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group reg
 
 module \$dffe (CLK, EN, D, Q);
 
@@ -1497,6 +2350,7 @@ endmodule
 
 // --------------------------------------------------------
 `ifndef SIMLIB_NOSR
+//* group reg
 
 module \$dffsr (CLK, SET, CLR, D, Q);
 
@@ -1528,8 +2382,43 @@ endgenerate
 
 endmodule
 
+// --------------------------------------------------------
+//* group reg
+
+module \$dffsre (CLK, SET, CLR, EN, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter SET_POLARITY = 1'b1;
+parameter CLR_POLARITY = 1'b1;
+parameter EN_POLARITY = 1'b1;
+
+input CLK, EN;
+input [WIDTH-1:0] SET, CLR, D;
+output reg [WIDTH-1:0] Q;
+
+wire pos_clk = CLK == CLK_POLARITY;
+wire [WIDTH-1:0] pos_set = SET_POLARITY ? SET : ~SET;
+wire [WIDTH-1:0] pos_clr = CLR_POLARITY ? CLR : ~CLR;
+
+genvar i;
+generate
+	for (i = 0; i < WIDTH; i = i+1) begin:bitslices
+		always @(posedge pos_set[i], posedge pos_clr[i], posedge pos_clk)
+			if (pos_clr[i])
+				Q[i] <= 0;
+			else if (pos_set[i])
+				Q[i] <= 1;
+			else if (EN == EN_POLARITY)
+				Q[i] <= D[i];
+	end
+endgenerate
+
+endmodule
+
 `endif
 // --------------------------------------------------------
+//* group reg
 
 module \$adff (CLK, ARST, D, Q);
 
@@ -1554,6 +2443,163 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group reg
+
+module \$aldff (CLK, ALOAD, AD, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter ALOAD_POLARITY = 1'b1;
+
+input CLK, ALOAD;
+input [WIDTH-1:0] AD;
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+wire pos_clk = CLK == CLK_POLARITY;
+wire pos_aload = ALOAD == ALOAD_POLARITY;
+
+always @(posedge pos_clk, posedge pos_aload) begin
+	if (pos_aload)
+		Q <= AD;
+	else
+		Q <= D;
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group reg
+
+module \$sdff (CLK, SRST, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter SRST_POLARITY = 1'b1;
+parameter SRST_VALUE = 0;
+
+input CLK, SRST;
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+wire pos_clk = CLK == CLK_POLARITY;
+wire pos_srst = SRST == SRST_POLARITY;
+
+always @(posedge pos_clk) begin
+	if (pos_srst)
+		Q <= SRST_VALUE;
+	else
+		Q <= D;
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group reg
+
+module \$adffe (CLK, ARST, EN, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter EN_POLARITY = 1'b1;
+parameter ARST_POLARITY = 1'b1;
+parameter ARST_VALUE = 0;
+
+input CLK, ARST, EN;
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+wire pos_clk = CLK == CLK_POLARITY;
+wire pos_arst = ARST == ARST_POLARITY;
+
+always @(posedge pos_clk, posedge pos_arst) begin
+	if (pos_arst)
+		Q <= ARST_VALUE;
+	else if (EN == EN_POLARITY)
+		Q <= D;
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group reg
+
+module \$aldffe (CLK, ALOAD, AD, EN, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter EN_POLARITY = 1'b1;
+parameter ALOAD_POLARITY = 1'b1;
+
+input CLK, ALOAD, EN;
+input [WIDTH-1:0] D;
+input [WIDTH-1:0] AD;
+output reg [WIDTH-1:0] Q;
+wire pos_clk = CLK == CLK_POLARITY;
+wire pos_aload = ALOAD == ALOAD_POLARITY;
+
+always @(posedge pos_clk, posedge pos_aload) begin
+	if (pos_aload)
+		Q <= AD;
+	else if (EN == EN_POLARITY)
+		Q <= D;
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group reg
+
+module \$sdffe (CLK, SRST, EN, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter EN_POLARITY = 1'b1;
+parameter SRST_POLARITY = 1'b1;
+parameter SRST_VALUE = 0;
+
+input CLK, SRST, EN;
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+wire pos_clk = CLK == CLK_POLARITY;
+wire pos_srst = SRST == SRST_POLARITY;
+
+always @(posedge pos_clk) begin
+	if (pos_srst)
+		Q <= SRST_VALUE;
+	else if (EN == EN_POLARITY)
+		Q <= D;
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group reg
+
+module \$sdffce (CLK, SRST, EN, D, Q);
+
+parameter WIDTH = 0;
+parameter CLK_POLARITY = 1'b1;
+parameter EN_POLARITY = 1'b1;
+parameter SRST_POLARITY = 1'b1;
+parameter SRST_VALUE = 0;
+
+input CLK, SRST, EN;
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+wire pos_clk = CLK == CLK_POLARITY;
+wire pos_srst = SRST == SRST_POLARITY;
+
+always @(posedge pos_clk) begin
+	if (EN == EN_POLARITY) begin
+		if (pos_srst)
+			Q <= SRST_VALUE;
+		else
+			Q <= D;
+	end
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group reg
 
 module \$dlatch (EN, D, Q);
 
@@ -1572,7 +2618,31 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group reg
+
+module \$adlatch (EN, ARST, D, Q);
+
+parameter WIDTH = 0;
+parameter EN_POLARITY = 1'b1;
+parameter ARST_POLARITY = 1'b1;
+parameter ARST_VALUE = 0;
+
+input EN, ARST;
+input [WIDTH-1:0] D;
+output reg [WIDTH-1:0] Q;
+
+always @* begin
+	if (ARST == ARST_POLARITY)
+		Q = ARST_VALUE;
+	else if (EN == EN_POLARITY)
+		Q = D;
+end
+
+endmodule
+
+// --------------------------------------------------------
 `ifndef SIMLIB_NOSR
+//* group reg
 
 module \$dlatchsr (EN, SET, CLR, D, Q);
 
@@ -1606,6 +2676,7 @@ endmodule
 
 `endif
 // --------------------------------------------------------
+//* group fsm
 
 module \$fsm (CLK, ARST, CTRL_IN, CTRL_OUT);
 
@@ -1700,6 +2771,7 @@ endmodule
 
 // --------------------------------------------------------
 `ifndef SIMLIB_NOMEM
+//* group mem
 
 module \$memrd (CLK, EN, ADDR, DATA);
 
@@ -1724,7 +2796,38 @@ end
 
 endmodule
 
+//* group mem
+
+module \$memrd_v2 (CLK, EN, ARST, SRST, ADDR, DATA);
+
+parameter MEMID = "";
+parameter ABITS = 8;
+parameter WIDTH = 8;
+
+parameter CLK_ENABLE = 0;
+parameter CLK_POLARITY = 0;
+parameter TRANSPARENCY_MASK = 0;
+parameter COLLISION_X_MASK = 0;
+parameter ARST_VALUE = 0;
+parameter SRST_VALUE = 0;
+parameter INIT_VALUE = 0;
+parameter CE_OVER_SRST = 0;
+
+input CLK, EN, ARST, SRST;
+input [ABITS-1:0] ADDR;
+output [WIDTH-1:0] DATA;
+
+initial begin
+	if (MEMID != "") begin
+		$display("ERROR: Found non-simulatable instance of $memrd_v2!");
+		$finish;
+	end
+end
+
+endmodule
+
 // --------------------------------------------------------
+//* group mem
 
 module \$memwr (CLK, EN, ADDR, DATA);
 
@@ -1750,7 +2853,34 @@ end
 
 endmodule
 
+//* group mem
+module \$memwr_v2 (CLK, EN, ADDR, DATA);
+
+parameter MEMID = "";
+parameter ABITS = 8;
+parameter WIDTH = 8;
+
+parameter CLK_ENABLE = 0;
+parameter CLK_POLARITY = 0;
+parameter PORTID = 0;
+parameter PRIORITY_MASK = 0;
+
+input CLK;
+input [WIDTH-1:0] EN;
+input [ABITS-1:0] ADDR;
+input [WIDTH-1:0] DATA;
+
+initial begin
+	if (MEMID != "") begin
+		$display("ERROR: Found non-simulatable instance of $memwr_v2!");
+		$finish;
+	end
+end
+
+endmodule
+
 // --------------------------------------------------------
+//* group mem
 
 module \$meminit (ADDR, DATA);
 
@@ -1774,6 +2904,32 @@ end
 endmodule
 
 // --------------------------------------------------------
+//* group mem
+
+module \$meminit_v2 (ADDR, DATA, EN);
+
+parameter MEMID = "";
+parameter ABITS = 8;
+parameter WIDTH = 8;
+parameter WORDS = 1;
+
+parameter PRIORITY = 0;
+
+input [ABITS-1:0] ADDR;
+input [WORDS*WIDTH-1:0] DATA;
+input [WIDTH-1:0] EN;
+
+initial begin
+	if (MEMID != "") begin
+		$display("ERROR: Found non-simulatable instance of $meminit_v2!");
+		$finish;
+	end
+end
+
+endmodule
+
+// --------------------------------------------------------
+//* group mem
 
 module \$mem (RD_CLK, RD_EN, RD_ADDR, RD_DATA, WR_CLK, WR_EN, WR_ADDR, WR_DATA);
 
@@ -1862,5 +3018,224 @@ end
 
 endmodule
 
+//* group mem
+
+module \$mem_v2 (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_EN, WR_ADDR, WR_DATA);
+
+parameter MEMID = "";
+parameter signed SIZE = 4;
+parameter signed OFFSET = 0;
+parameter signed ABITS = 2;
+parameter signed WIDTH = 8;
+parameter signed INIT = 1'bx;
+
+parameter signed RD_PORTS = 1;
+parameter RD_CLK_ENABLE = 1'b1;
+parameter RD_CLK_POLARITY = 1'b1;
+parameter RD_TRANSPARENCY_MASK = 1'b0;
+parameter RD_COLLISION_X_MASK = 1'b0;
+parameter RD_WIDE_CONTINUATION = 1'b0;
+parameter RD_CE_OVER_SRST = 1'b0;
+parameter RD_ARST_VALUE = 1'b0;
+parameter RD_SRST_VALUE = 1'b0;
+parameter RD_INIT_VALUE = 1'b0;
+
+parameter signed WR_PORTS = 1;
+parameter WR_CLK_ENABLE = 1'b1;
+parameter WR_CLK_POLARITY = 1'b1;
+parameter WR_PRIORITY_MASK = 1'b0;
+parameter WR_WIDE_CONTINUATION = 1'b0;
+
+input [RD_PORTS-1:0] RD_CLK;
+input [RD_PORTS-1:0] RD_EN;
+input [RD_PORTS-1:0] RD_ARST;
+input [RD_PORTS-1:0] RD_SRST;
+input [RD_PORTS*ABITS-1:0] RD_ADDR;
+output reg [RD_PORTS*WIDTH-1:0] RD_DATA;
+
+input [WR_PORTS-1:0] WR_CLK;
+input [WR_PORTS*WIDTH-1:0] WR_EN;
+input [WR_PORTS*ABITS-1:0] WR_ADDR;
+input [WR_PORTS*WIDTH-1:0] WR_DATA;
+
+reg [WIDTH-1:0] memory [SIZE-1:0];
+
+integer i, j, k;
+reg [WR_PORTS-1:0] LAST_WR_CLK;
+reg [RD_PORTS-1:0] LAST_RD_CLK;
+
+function port_active;
+	input clk_enable;
+	input clk_polarity;
+	input last_clk;
+	input this_clk;
+	begin
+		casez ({clk_enable, clk_polarity, last_clk, this_clk})
+			4'b0???: port_active = 1;
+			4'b1101: port_active = 1;
+			4'b1010: port_active = 1;
+			default: port_active = 0;
+		endcase
+	end
+endfunction
+
+initial begin
+	for (i = 0; i < SIZE; i = i+1)
+		memory[i] = INIT >>> (i*WIDTH);
+	RD_DATA = RD_INIT_VALUE;
+end
+
+always @(RD_CLK, RD_ARST, RD_ADDR, RD_DATA, WR_CLK, WR_EN, WR_ADDR, WR_DATA) begin
+`ifdef SIMLIB_MEMDELAY
+	#`SIMLIB_MEMDELAY;
 `endif
+	for (i = 0; i < RD_PORTS; i = i+1) begin
+		if (RD_CLK_ENABLE[i] && RD_EN[i] && port_active(RD_CLK_ENABLE[i], RD_CLK_POLARITY[i], LAST_RD_CLK[i], RD_CLK[i])) begin
+			// $display("Read from %s: addr=%b data=%b", MEMID, RD_ADDR[i*ABITS +: ABITS],  memory[RD_ADDR[i*ABITS +: ABITS] - OFFSET]);
+			RD_DATA[i*WIDTH +: WIDTH] <= memory[RD_ADDR[i*ABITS +: ABITS] - OFFSET];
+
+			for (j = 0; j < WR_PORTS; j = j+1) begin
+				if (RD_TRANSPARENCY_MASK[i*WR_PORTS + j] && port_active(WR_CLK_ENABLE[j], WR_CLK_POLARITY[j], LAST_WR_CLK[j], WR_CLK[j]) && RD_ADDR[i*ABITS +: ABITS] == WR_ADDR[j*ABITS +: ABITS])
+					for (k = 0; k < WIDTH; k = k+1)
+						if (WR_EN[j*WIDTH+k])
+							RD_DATA[i*WIDTH+k] <= WR_DATA[j*WIDTH+k];
+				if (RD_COLLISION_X_MASK[i*WR_PORTS + j] && port_active(WR_CLK_ENABLE[j], WR_CLK_POLARITY[j], LAST_WR_CLK[j], WR_CLK[j]) && RD_ADDR[i*ABITS +: ABITS] == WR_ADDR[j*ABITS +: ABITS])
+					for (k = 0; k < WIDTH; k = k+1)
+						if (WR_EN[j*WIDTH+k])
+							RD_DATA[i*WIDTH+k] <= 1'bx;
+			end
+		end
+	end
+
+	for (i = 0; i < WR_PORTS; i = i+1) begin
+		if (port_active(WR_CLK_ENABLE[i], WR_CLK_POLARITY[i], LAST_WR_CLK[i], WR_CLK[i]))
+			for (j = 0; j < WIDTH; j = j+1)
+				if (WR_EN[i*WIDTH+j]) begin
+					// $display("Write to %s: addr=%b data=%b", MEMID, WR_ADDR[i*ABITS +: ABITS], WR_DATA[i*WIDTH+j]);
+					memory[WR_ADDR[i*ABITS +: ABITS] - OFFSET][j] = WR_DATA[i*WIDTH+j];
+				end
+	end
+
+	for (i = 0; i < RD_PORTS; i = i+1) begin
+		if (!RD_CLK_ENABLE[i]) begin
+			// $display("Combinatorial read from %s: addr=%b data=%b", MEMID, RD_ADDR[i*ABITS +: ABITS],  memory[RD_ADDR[i*ABITS +: ABITS] - OFFSET]);
+			RD_DATA[i*WIDTH +: WIDTH] <= memory[RD_ADDR[i*ABITS +: ABITS] - OFFSET];
+		end
+	end
+
+	for (i = 0; i < RD_PORTS; i = i+1) begin
+		if (RD_SRST[i] && port_active(RD_CLK_ENABLE[i], RD_CLK_POLARITY[i], LAST_RD_CLK[i], RD_CLK[i]) && (RD_EN[i] || !RD_CE_OVER_SRST[i]))
+			RD_DATA[i*WIDTH +: WIDTH] <= RD_SRST_VALUE[i*WIDTH +: WIDTH];
+		if (RD_ARST[i])
+			RD_DATA[i*WIDTH +: WIDTH] <= RD_ARST_VALUE[i*WIDTH +: WIDTH];
+	end
+
+	LAST_RD_CLK <= RD_CLK;
+	LAST_WR_CLK <= WR_CLK;
+end
+
+endmodule
+
+`endif
+
 // --------------------------------------------------------
+//* group formal_tag
+module \$set_tag (A, SET, CLR, Y);
+
+parameter TAG = "";
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A;
+input [WIDTH-1:0] SET;
+input [WIDTH-1:0] CLR;
+output [WIDTH-1:0] Y;
+
+assign Y = A;
+
+endmodule
+
+// --------------------------------------------------------
+//* group formal_tag
+module \$get_tag (A, Y);
+
+parameter TAG = "";
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A;
+output [WIDTH-1:0] Y;
+
+assign Y = A;
+
+endmodule
+
+// --------------------------------------------------------
+//* group formal_tag
+module \$overwrite_tag (A, SET, CLR);
+
+parameter TAG = "";
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A;
+input [WIDTH-1:0] SET;
+input [WIDTH-1:0] CLR;
+
+endmodule
+
+// --------------------------------------------------------
+//* group formal_tag
+module \$original_tag (A, Y);
+
+parameter TAG = "";
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A;
+output [WIDTH-1:0] Y;
+
+assign Y = A;
+
+endmodule
+
+// --------------------------------------------------------
+//* group formal_tag
+module \$future_ff (A, Y);
+
+parameter WIDTH = 0;
+
+input [WIDTH-1:0] A;
+output [WIDTH-1:0] Y;
+
+assign Y = A;
+
+endmodule
+
+// --------------------------------------------------------
+//* group debug
+(* noblackbox *)
+module \$scopeinfo ();
+
+parameter TYPE = "";
+
+endmodule
+
+// --------------------------------------------------------
+//* group wire
+module \$connect (A, B);
+
+parameter WIDTH = 0;
+
+inout [WIDTH-1:0] A;
+inout [WIDTH-1:0] B;
+
+tran connect[WIDTH-1:0] (A, B);
+
+endmodule
+
+// --------------------------------------------------------
+//* group wire
+module \$input_port (Y);
+
+parameter WIDTH = 0;
+
+inout [WIDTH-1:0] Y;
+
+endmodule

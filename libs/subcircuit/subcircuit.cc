@@ -2,7 +2,7 @@
  *  SubCircuit -- An implementation of the Ullmann Subgraph Isomorphism
  *                algorithm for coarse grain logic networks
  *
- *  Copyright (C) 2013  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2013  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -21,6 +21,7 @@
 #include "subcircuit.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -316,16 +317,14 @@ class SubCircuit::SolverWorker
 
 	// helper functions for handling permutations
 
-	static const int maxPermutationsLimit = 1000000;
+	static constexpr int maxPermutationsLimit = 1000000;
 
 	static int numberOfPermutations(const std::vector<std::string> &list)
 	{
-		int numPermutations = 1;
-		for (int i = 0; i < int(list.size()); i++) {
-			assert(numPermutations < maxPermutationsLimit);
-			numPermutations *= i+1;
-		}
-		return numPermutations;
+		constexpr size_t mappedPermutationsSize = 10;
+		constexpr int mappedPermutations[mappedPermutationsSize] = {1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880};
+		assert(list.size() < mappedPermutationsSize);
+		return mappedPermutations[list.size()];
 	}
 
 	static void permutateVectorToMap(std::map<std::string, std::string> &map, const std::vector<std::string> &list, int idx)
@@ -1691,4 +1690,3 @@ void SubCircuit::Solver::clearConfig()
 {
 	worker->clearConfig();
 }
-

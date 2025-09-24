@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -39,45 +39,45 @@ bool check_signal(RTLIL::Module *mod, RTLIL::SigSpec signal, RTLIL::SigSpec ref,
 
 	for (auto cell : mod->cells())
 	{
-		if (cell->type == "$reduce_or" && cell->getPort("\\Y") == signal)
-			return check_signal(mod, cell->getPort("\\A"), ref, polarity);
+		if (cell->type == ID($reduce_or) && cell->getPort(ID::Y) == signal)
+			return check_signal(mod, cell->getPort(ID::A), ref, polarity);
 
-		if (cell->type == "$reduce_bool" && cell->getPort("\\Y") == signal)
-			return check_signal(mod, cell->getPort("\\A"), ref, polarity);
+		if (cell->type == ID($reduce_bool) && cell->getPort(ID::Y) == signal)
+			return check_signal(mod, cell->getPort(ID::A), ref, polarity);
 
-		if (cell->type == "$logic_not" && cell->getPort("\\Y") == signal) {
+		if (cell->type == ID($logic_not) && cell->getPort(ID::Y) == signal) {
 			polarity = !polarity;
-			return check_signal(mod, cell->getPort("\\A"), ref, polarity);
+			return check_signal(mod, cell->getPort(ID::A), ref, polarity);
 		}
 
-		if (cell->type == "$not" && cell->getPort("\\Y") == signal) {
+		if (cell->type == ID($not) && cell->getPort(ID::Y) == signal) {
 			polarity = !polarity;
-			return check_signal(mod, cell->getPort("\\A"), ref, polarity);
+			return check_signal(mod, cell->getPort(ID::A), ref, polarity);
 		}
 
-		if ((cell->type == "$eq" || cell->type == "$eqx") && cell->getPort("\\Y") == signal) {
-			if (cell->getPort("\\A").is_fully_const()) {
-				if (!cell->getPort("\\A").as_bool())
+		if (cell->type.in(ID($eq), ID($eqx)) && cell->getPort(ID::Y) == signal) {
+			if (cell->getPort(ID::A).is_fully_const()) {
+				if (!cell->getPort(ID::A).as_bool())
 					polarity = !polarity;
-				return check_signal(mod, cell->getPort("\\B"), ref, polarity);
+				return check_signal(mod, cell->getPort(ID::B), ref, polarity);
 			}
-			if (cell->getPort("\\B").is_fully_const()) {
-				if (!cell->getPort("\\B").as_bool())
+			if (cell->getPort(ID::B).is_fully_const()) {
+				if (!cell->getPort(ID::B).as_bool())
 					polarity = !polarity;
-				return check_signal(mod, cell->getPort("\\A"), ref, polarity);
+				return check_signal(mod, cell->getPort(ID::A), ref, polarity);
 			}
 		}
 
-		if ((cell->type == "$ne" || cell->type == "$nex") && cell->getPort("\\Y") == signal) {
-			if (cell->getPort("\\A").is_fully_const()) {
-				if (cell->getPort("\\A").as_bool())
+		if (cell->type.in(ID($ne), ID($nex)) && cell->getPort(ID::Y) == signal) {
+			if (cell->getPort(ID::A).is_fully_const()) {
+				if (cell->getPort(ID::A).as_bool())
 					polarity = !polarity;
-				return check_signal(mod, cell->getPort("\\B"), ref, polarity);
+				return check_signal(mod, cell->getPort(ID::B), ref, polarity);
 			}
-			if (cell->getPort("\\B").is_fully_const()) {
-				if (cell->getPort("\\B").as_bool())
+			if (cell->getPort(ID::B).is_fully_const()) {
+				if (cell->getPort(ID::B).as_bool())
 					polarity = !polarity;
-				return check_signal(mod, cell->getPort("\\A"), ref, polarity);
+				return check_signal(mod, cell->getPort(ID::A), ref, polarity);
 			}
 		}
 	}
@@ -153,57 +153,99 @@ void eliminate_const(RTLIL::Module *mod, RTLIL::CaseRule *cs, RTLIL::SigSpec con
 	}
 }
 
+RTLIL::SigSpec apply_reset(RTLIL::Module *mod, RTLIL::Process *proc, RTLIL::SyncRule *sync, SigMap &assign_map, RTLIL::SigSpec root_sig, bool polarity, RTLIL::SigSpec sig, RTLIL::SigSpec log_sig) {
+	RTLIL::SigSpec rspec = assign_map(sig);
+	RTLIL::SigSpec rval = RTLIL::SigSpec(RTLIL::State::Sm, rspec.size());
+	for (int i = 0; i < GetSize(rspec); i++)
+		if (rspec[i].wire == NULL)
+			rval[i] = rspec[i];
+	RTLIL::SigSpec last_rval;
+	for (int count = 0; rval != last_rval; count++) {
+		last_rval = rval;
+		apply_const(mod, rspec, rval, &proc->root_case, root_sig, polarity, false);
+		assign_map.apply(rval);
+		if (rval.is_fully_const())
+			break;
+		if (count > 100)
+			log_error("Async reset %s yields endless loop at value %s for signal %s.\n",
+					log_signal(sync->signal), log_signal(rval), log_signal(log_sig));
+		rspec = rval;
+	}
+	if (rval.has_marked_bits())
+		log_error("Async reset %s yields non-constant value %s for signal %s.\n",
+				log_signal(sync->signal), log_signal(rval), log_signal(log_sig));
+	return rval;
+}
+
 void proc_arst(RTLIL::Module *mod, RTLIL::Process *proc, SigMap &assign_map)
 {
-restart_proc_arst:
-	if (proc->root_case.switches.size() != 1)
-		return;
-
-	RTLIL::SigSpec root_sig = proc->root_case.switches[0]->signal;
+	std::vector<RTLIL::SyncRule *> arst_syncs;
+	std::vector<RTLIL::SyncRule *> edge_syncs;
+	std::vector<RTLIL::SyncRule *> other_syncs;
 
 	for (auto &sync : proc->syncs) {
-		if (sync->type == RTLIL::SyncType::STp || sync->type == RTLIL::SyncType::STn) {
+		if (sync->type == RTLIL::SyncType::ST0 || sync->type == RTLIL::SyncType::ST1) {
+			arst_syncs.push_back(sync);
+		} else if (sync->type == RTLIL::SyncType::STp || sync->type == RTLIL::SyncType::STn) {
+			edge_syncs.push_back(sync);
+		} else {
+			other_syncs.push_back(sync);
+		}
+	}
+
+	bool did_something = false;
+
+	while (proc->root_case.switches.size() == 1) {
+		RTLIL::SigSpec root_sig = proc->root_case.switches[0]->signal;
+
+		bool found = false;
+		for (auto it = edge_syncs.begin(); it != edge_syncs.end(); ++it) {
+			auto sync = *it;
 			bool polarity = sync->type == RTLIL::SyncType::STp;
 			if (check_signal(mod, root_sig, sync->signal, polarity)) {
-				if (proc->syncs.size() == 1) {
-					log("Found VHDL-style edge-trigger %s in `%s.%s'.\n", log_signal(sync->signal), mod->name.c_str(), proc->name.c_str());
-				} else {
-					log("Found async reset %s in `%s.%s'.\n", log_signal(sync->signal), mod->name.c_str(), proc->name.c_str());
+				if (edge_syncs.size() > 1) {
+					log("Found async reset %s in `%s.%s'.\n", log_signal(sync->signal), mod->name, proc->name);
 					sync->type = sync->type == RTLIL::SyncType::STp ? RTLIL::SyncType::ST1 : RTLIL::SyncType::ST0;
-				}
-				for (auto &action : sync->actions) {
-					RTLIL::SigSpec rspec = action.second;
-					RTLIL::SigSpec rval = RTLIL::SigSpec(RTLIL::State::Sm, rspec.size());
-					for (int i = 0; i < GetSize(rspec); i++)
-						if (rspec[i].wire == NULL)
-							rval[i] = rspec[i];
-					RTLIL::SigSpec last_rval;
-					for (int count = 0; rval != last_rval; count++) {
-						last_rval = rval;
-						apply_const(mod, rspec, rval, &proc->root_case, root_sig, polarity, false);
-						assign_map.apply(rval);
-						if (rval.is_fully_const())
-							break;
-						if (count > 100)
-							log_error("Async reset %s yields endless loop at value %s for signal %s.\n",
-									log_signal(sync->signal), log_signal(rval), log_signal(action.first));
-						rspec = rval;
+					arst_syncs.push_back(sync);
+					edge_syncs.erase(it);
+					for (auto &action : sync->actions) {
+						action.second = apply_reset(mod, proc, sync, assign_map, root_sig, polarity, action.second, action.first);
 					}
-					if (rval.has_marked_bits())
-						log_error("Async reset %s yields non-constant value %s for signal %s.\n",
-								log_signal(sync->signal), log_signal(rval), log_signal(action.first));
-					action.second = rval;
+					for (auto &memwr : sync->mem_write_actions) {
+						RTLIL::SigSpec en = apply_reset(mod, proc, sync, assign_map, root_sig, polarity, memwr.enable, memwr.enable);
+						if (!en.is_fully_zero()) {
+							log_error("Async reset %s causes memory write to %s.\n",
+									log_signal(sync->signal), log_id(memwr.memid));
+						}
+						apply_reset(mod, proc, sync, assign_map, root_sig, polarity, memwr.address, memwr.address);
+						apply_reset(mod, proc, sync, assign_map, root_sig, polarity, memwr.data, memwr.data);
+					}
+					sync->mem_write_actions.clear();
+					eliminate_const(mod, &proc->root_case, root_sig, polarity);
+				} else {
+					log("Found VHDL-style edge-trigger %s in `%s.%s'.\n", log_signal(sync->signal), mod->name, proc->name);
+					eliminate_const(mod, &proc->root_case, root_sig, !polarity);
 				}
-				eliminate_const(mod, &proc->root_case, root_sig, polarity);
-				goto restart_proc_arst;
+				did_something = true;
+				found = true;
+				break;
 			}
 		}
+		if (!found)
+			break;
+	}
+
+	if (did_something) {
+		proc->syncs.clear();
+		proc->syncs.insert(proc->syncs.end(), arst_syncs.begin(), arst_syncs.end());
+		proc->syncs.insert(proc->syncs.end(), edge_syncs.begin(), edge_syncs.end());
+		proc->syncs.insert(proc->syncs.end(), other_syncs.begin(), other_syncs.end());
 	}
 }
 
 struct ProcArstPass : public Pass {
 	ProcArstPass() : Pass("proc_arst", "detect asynchronous resets") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -221,7 +263,7 @@ struct ProcArstPass : public Pass {
 		log("        in the 'init' attribute on the net.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::string global_arst;
 		bool global_arst_neg = false;
@@ -246,46 +288,43 @@ struct ProcArstPass : public Pass {
 		extra_args(args, argidx, design);
 		pool<Wire*> delete_initattr_wires;
 
-		for (auto mod : design->modules())
-			if (design->selected(mod)) {
-				SigMap assign_map(mod);
-				for (auto &proc_it : mod->processes) {
-					if (!design->selected(mod, proc_it.second))
-						continue;
-					proc_arst(mod, proc_it.second, assign_map);
-					if (global_arst.empty() || mod->wire(global_arst) == nullptr)
-						continue;
-					std::vector<RTLIL::SigSig> arst_actions;
-					for (auto sync : proc_it.second->syncs)
-						if (sync->type == RTLIL::SyncType::STp || sync->type == RTLIL::SyncType::STn)
-							for (auto &act : sync->actions) {
-								RTLIL::SigSpec arst_sig, arst_val;
-								for (auto &chunk : act.first.chunks())
-									if (chunk.wire && chunk.wire->attributes.count("\\init")) {
-										RTLIL::SigSpec value = chunk.wire->attributes.at("\\init");
-										value.extend_u0(chunk.wire->width, false);
-										arst_sig.append(chunk);
-										arst_val.append(value.extract(chunk.offset, chunk.width));
-										delete_initattr_wires.insert(chunk.wire);
-									}
-								if (arst_sig.size()) {
-									log("Added global reset to process %s: %s <- %s\n",
-											proc_it.first.c_str(), log_signal(arst_sig), log_signal(arst_val));
-									arst_actions.push_back(RTLIL::SigSig(arst_sig, arst_val));
+		for (auto mod : design->all_selected_modules()) {
+			SigMap assign_map(mod);
+			for (auto proc : mod->selected_processes()) {
+				proc_arst(mod, proc, assign_map);
+				if (global_arst.empty() || mod->wire(global_arst) == nullptr)
+					continue;
+				std::vector<RTLIL::SigSig> arst_actions;
+				for (auto sync : proc->syncs)
+					if (sync->type == RTLIL::SyncType::STp || sync->type == RTLIL::SyncType::STn)
+						for (auto &act : sync->actions) {
+							RTLIL::SigSpec arst_sig, arst_val;
+							for (auto &chunk : act.first.chunks())
+								if (chunk.wire && chunk.wire->attributes.count(ID::init)) {
+									RTLIL::SigSpec value = chunk.wire->attributes.at(ID::init);
+									value.extend_u0(chunk.wire->width, false);
+									arst_sig.append(chunk);
+									arst_val.append(value.extract(chunk.offset, chunk.width));
+									delete_initattr_wires.insert(chunk.wire);
 								}
+							if (arst_sig.size()) {
+								log("Added global reset to process %s: %s <- %s\n",
+										proc->name.c_str(), log_signal(arst_sig), log_signal(arst_val));
+								arst_actions.push_back(RTLIL::SigSig(arst_sig, arst_val));
 							}
-					if (!arst_actions.empty()) {
-						RTLIL::SyncRule *sync = new RTLIL::SyncRule;
-						sync->type = global_arst_neg ? RTLIL::SyncType::ST0 : RTLIL::SyncType::ST1;
-						sync->signal = mod->wire(global_arst);
-						sync->actions = arst_actions;
-						proc_it.second->syncs.push_back(sync);
-					}
+						}
+				if (!arst_actions.empty()) {
+					RTLIL::SyncRule *sync = new RTLIL::SyncRule;
+					sync->type = global_arst_neg ? RTLIL::SyncType::ST0 : RTLIL::SyncType::ST1;
+					sync->signal = mod->wire(global_arst);
+					sync->actions = arst_actions;
+					proc->syncs.push_back(sync);
 				}
 			}
+		}
 
 		for (auto wire : delete_initattr_wires)
-			wire->attributes.erase("\\init");
+			wire->attributes.erase(ID::init);
 	}
 } ProcArstPass;
 

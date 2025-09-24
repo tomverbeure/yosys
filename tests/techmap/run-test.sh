@@ -1,10 +1,4 @@
-#!/bin/bash
-set -e
-for x in *_runtest.sh; do
-	echo "Running $x.."
-	if ! bash $x &> ${x%.sh}.log; then
-		tail ${x%.sh}.log
-		echo ERROR
-		exit 1
-	fi
-done
+#!/usr/bin/env bash
+set -eu
+source ../gen-tests-makefile.sh
+generate_mk --yosys-scripts --tcl-scripts --bash --yosys-args "-e 'select out of bounds'"

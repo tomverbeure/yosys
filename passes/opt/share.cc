@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -18,11 +18,12 @@
  */
 
 #include "kernel/yosys.h"
-#include "kernel/satgen.h"
+#include "kernel/qcsat.h"
 #include "kernel/sigtools.h"
 #include "kernel/modtools.h"
 #include "kernel/utils.h"
 #include "kernel/macc.h"
+#include <iterator>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -33,6 +34,7 @@ typedef std::pair<RTLIL::SigSpec, RTLIL::Const> ssc_pair_t;
 struct ShareWorkerConfig
 {
 	int limit;
+	size_t pattern_limit;
 	bool opt_force;
 	bool opt_aggressive;
 	bool opt_fast;
@@ -41,7 +43,8 @@ struct ShareWorkerConfig
 
 struct ShareWorker
 {
-	ShareWorkerConfig config;
+	const ShareWorkerConfig config;
+	int limit;
 	pool<RTLIL::IdString> generic_ops;
 
 	RTLIL::Design *design;
@@ -49,7 +52,6 @@ struct ShareWorker
 
 	CellTypes fwd_ct, cone_ct;
 	ModWalker modwalker;
-	ModIndex mi;
 
 	pool<RTLIL::Cell*> cells_to_remove;
 	pool<RTLIL::Cell*> recursion_state;
@@ -57,8 +59,6 @@ struct ShareWorker
 	SigMap topo_sigmap;
 	std::map<RTLIL::Cell*, std::set<RTLIL::Cell*, cell_ptr_cmp>, cell_ptr_cmp> topo_cell_drivers;
 	std::map<RTLIL::SigBit, std::set<RTLIL::Cell*, cell_ptr_cmp>> topo_bit_drivers;
-
-	std::vector<std::pair<RTLIL::SigBit, RTLIL::SigBit>> exclusive_ctrls;
 
 
 	// ------------------------------------------------------------------------------
@@ -89,8 +89,8 @@ struct ShareWorker
 			queue_bits.clear();
 
 			for (auto &pbit : portbits) {
-				if (pbit.cell->type == "$mux" || pbit.cell->type == "$pmux") {
-					pool<RTLIL::SigBit> bits = modwalker.sigmap(pbit.cell->getPort("\\S")).to_sigbit_pool();
+				if ((pbit.cell->type == ID($mux) || pbit.cell->type == ID($pmux)) && visited_cells.count(pbit.cell) == 0) {
+					pool<RTLIL::SigBit> bits = modwalker.sigmap(pbit.cell->getPort(ID::S)).to_sigbit_pool();
 					terminal_bits.insert(bits.begin(), bits.end());
 					queue_bits.insert(bits.begin(), bits.end());
 					visited_cells.insert(pbit.cell);
@@ -110,7 +110,7 @@ struct ShareWorker
 	// Code for sharing and comparing MACC cells
 	// ---------------------------------------------------
 
-	static int bits_macc_port(const Macc::port_t &p, int width)
+	static int bits_macc_term(const Macc::term_t &p, int width)
 	{
 		if (GetSize(p.in_a) == 0 || GetSize(p.in_b) == 0)
 			return min(max(GetSize(p.in_a), GetSize(p.in_b)), width);
@@ -119,20 +119,20 @@ struct ShareWorker
 
 	static int bits_macc(const Macc &m, int width)
 	{
-		int bits = GetSize(m.bit_ports);
-		for (auto &p : m.ports)
-			bits += bits_macc_port(p, width);
+		int bits = 0;
+		for (auto &p : m.terms)
+			bits += bits_macc_term(p, width);
 		return bits;
 	}
 
 	static int bits_macc(RTLIL::Cell *c)
 	{
 		Macc m(c);
-		int width = GetSize(c->getPort("\\Y"));
+		int width = GetSize(c->getPort(ID::Y));
 		return bits_macc(m, width);
 	}
 
-	static bool cmp_macc_ports(const Macc::port_t &p1, const Macc::port_t &p2)
+	static bool cmp_macc_ports(const Macc::term_t &p1, const Macc::term_t &p2)
 	{
 		bool mul1 = GetSize(p1.in_a) && GetSize(p1.in_b);
 		bool mul2 = GetSize(p2.in_a) && GetSize(p2.in_b);
@@ -161,7 +161,7 @@ struct ShareWorker
 		return false;
 	}
 
-	int share_macc_ports(Macc::port_t &p1, Macc::port_t &p2, int w1, int w2,
+	int share_macc_ports(Macc::term_t &p1, Macc::term_t &p2, int w1, int w2,
 			RTLIL::SigSpec act = RTLIL::SigSpec(), Macc *supermacc = nullptr, pool<RTLIL::Cell*> *supercell_aux = nullptr)
 	{
 		if (p1.do_subtract != p2.do_subtract)
@@ -216,12 +216,12 @@ struct ShareWorker
 				supercell_aux->insert(module->addMux(NEW_ID, sig_b2, sig_b1, act, sig_b));
 			}
 
-			Macc::port_t p;
+			Macc::term_t p;
 			p.in_a = sig_a;
 			p.in_b = sig_b;
 			p.is_signed = force_signed;
 			p.do_subtract = p1.do_subtract;
-			supermacc->ports.push_back(p);
+			supermacc->terms.push_back(p);
 		}
 
 		int score = 1000 + abs(GetSize(p1.in_a) - GetSize(p2.in_a)) * max(abs(GetSize(p1.in_b) - GetSize(p2.in_b)), 1);
@@ -242,21 +242,21 @@ struct ShareWorker
 	{
 		Macc m1(c1), m2(c2), supermacc;
 
-		int w1 = GetSize(c1->getPort("\\Y")), w2 = GetSize(c2->getPort("\\Y"));
+		int w1 = GetSize(c1->getPort(ID::Y)), w2 = GetSize(c2->getPort(ID::Y));
 		int width = max(w1, w2);
 
 		m1.optimize(w1);
 		m2.optimize(w2);
 
-		std::sort(m1.ports.begin(), m1.ports.end(), cmp_macc_ports);
-		std::sort(m2.ports.begin(), m2.ports.end(), cmp_macc_ports);
+		std::sort(m1.terms.begin(), m1.terms.end(), cmp_macc_ports);
+		std::sort(m2.terms.begin(), m2.terms.end(), cmp_macc_ports);
 
 		std::set<int> m1_unmapped, m2_unmapped;
 
-		for (int i = 0; i < GetSize(m1.ports); i++)
+		for (int i = 0; i < GetSize(m1.terms); i++)
 			m1_unmapped.insert(i);
 
-		for (int i = 0; i < GetSize(m2.ports); i++)
+		for (int i = 0; i < GetSize(m2.terms); i++)
 			m2_unmapped.insert(i);
 
 		while (1)
@@ -265,7 +265,7 @@ struct ShareWorker
 
 			for (int i : m1_unmapped)
 			for (int j : m2_unmapped) {
-				int score = share_macc_ports(m1.ports[i], m2.ports[j], w1, w2);
+				int score = share_macc_ports(m1.terms[i], m2.terms[j], w1, w2);
 				if (score >= 0 && (best_i < 0 || best_score > score))
 					best_i = i, best_j = j, best_score = score;
 			}
@@ -273,66 +273,66 @@ struct ShareWorker
 			if (best_i >= 0) {
 				m1_unmapped.erase(best_i);
 				m2_unmapped.erase(best_j);
-				share_macc_ports(m1.ports[best_i], m2.ports[best_j], w1, w2, act, &supermacc, supercell_aux);
+				share_macc_ports(m1.terms[best_i], m2.terms[best_j], w1, w2, act, &supermacc, supercell_aux);
 			} else
 				break;
 		}
 
 		for (int i : m1_unmapped)
 		{
-			RTLIL::SigSpec sig_a = m1.ports[i].in_a;
-			RTLIL::SigSpec sig_b = m1.ports[i].in_b;
+			RTLIL::SigSpec sig_a = m1.terms[i].in_a;
+			RTLIL::SigSpec sig_b = m1.terms[i].in_b;
 
 			if (supercell_aux && GetSize(sig_a)) {
 				sig_a = module->addWire(NEW_ID, GetSize(sig_a));
-				supercell_aux->insert(module->addMux(NEW_ID, RTLIL::SigSpec(0, GetSize(sig_a)), m1.ports[i].in_a, act, sig_a));
+				supercell_aux->insert(module->addMux(NEW_ID, RTLIL::SigSpec(0, GetSize(sig_a)), m1.terms[i].in_a, act, sig_a));
 			}
 
 			if (supercell_aux && GetSize(sig_b)) {
 				sig_b = module->addWire(NEW_ID, GetSize(sig_b));
-				supercell_aux->insert(module->addMux(NEW_ID, RTLIL::SigSpec(0, GetSize(sig_b)), m1.ports[i].in_b, act, sig_b));
+				supercell_aux->insert(module->addMux(NEW_ID, RTLIL::SigSpec(0, GetSize(sig_b)), m1.terms[i].in_b, act, sig_b));
 			}
 
-			Macc::port_t p;
+			Macc::term_t p;
 			p.in_a = sig_a;
 			p.in_b = sig_b;
-			p.is_signed = m1.ports[i].is_signed;
-			p.do_subtract = m1.ports[i].do_subtract;
-			supermacc.ports.push_back(p);
+			p.is_signed = m1.terms[i].is_signed;
+			p.do_subtract = m1.terms[i].do_subtract;
+			supermacc.terms.push_back(p);
 		}
 
 		for (int i : m2_unmapped)
 		{
-			RTLIL::SigSpec sig_a = m2.ports[i].in_a;
-			RTLIL::SigSpec sig_b = m2.ports[i].in_b;
+			RTLIL::SigSpec sig_a = m2.terms[i].in_a;
+			RTLIL::SigSpec sig_b = m2.terms[i].in_b;
 
 			if (supercell_aux && GetSize(sig_a)) {
 				sig_a = module->addWire(NEW_ID, GetSize(sig_a));
-				supercell_aux->insert(module->addMux(NEW_ID, m2.ports[i].in_a, RTLIL::SigSpec(0, GetSize(sig_a)), act, sig_a));
+				supercell_aux->insert(module->addMux(NEW_ID, m2.terms[i].in_a, RTLIL::SigSpec(0, GetSize(sig_a)), act, sig_a));
 			}
 
 			if (supercell_aux && GetSize(sig_b)) {
 				sig_b = module->addWire(NEW_ID, GetSize(sig_b));
-				supercell_aux->insert(module->addMux(NEW_ID, m2.ports[i].in_b, RTLIL::SigSpec(0, GetSize(sig_b)), act, sig_b));
+				supercell_aux->insert(module->addMux(NEW_ID, m2.terms[i].in_b, RTLIL::SigSpec(0, GetSize(sig_b)), act, sig_b));
 			}
 
-			Macc::port_t p;
+			Macc::term_t p;
 			p.in_a = sig_a;
 			p.in_b = sig_b;
-			p.is_signed = m2.ports[i].is_signed;
-			p.do_subtract = m2.ports[i].do_subtract;
-			supermacc.ports.push_back(p);
+			p.is_signed = m2.terms[i].is_signed;
+			p.do_subtract = m2.terms[i].do_subtract;
+			supermacc.terms.push_back(p);
 		}
 
 		if (supercell)
 		{
 			RTLIL::SigSpec sig_y = module->addWire(NEW_ID, width);
 
-			supercell_aux->insert(module->addPos(NEW_ID, sig_y, c1->getPort("\\Y")));
-			supercell_aux->insert(module->addPos(NEW_ID, sig_y, c2->getPort("\\Y")));
+			supercell_aux->insert(module->addPos(NEW_ID, sig_y, c1->getPort(ID::Y)));
+			supercell_aux->insert(module->addPos(NEW_ID, sig_y, c2->getPort(ID::Y)));
 
-			supercell->setParam("\\Y_WIDTH", width);
-			supercell->setPort("\\Y", sig_y);
+			supercell->setParam(ID::Y_WIDTH, width);
+			supercell->setPort(ID::Y, sig_y);
 
 			supermacc.optimize(width);
 			supermacc.to_cell(supercell);
@@ -368,22 +368,22 @@ struct ShareWorker
 				continue;
 			}
 
-			if (cell->type == "$memrd") {
-				if (cell->parameters.at("\\CLK_ENABLE").as_bool())
+			if (cell->type.in(ID($memrd), ID($memrd_v2))) {
+				if (cell->parameters.at(ID::CLK_ENABLE).as_bool())
 					continue;
-				if (config.opt_aggressive || !modwalker.sigmap(cell->getPort("\\ADDR")).is_fully_const())
+				if (config.opt_aggressive || !modwalker.sigmap(cell->getPort(ID::ADDR)).is_fully_const())
 					shareable_cells.insert(cell);
 				continue;
 			}
 
-			if (cell->type == "$mul" || cell->type == "$div" || cell->type == "$mod") {
-				if (config.opt_aggressive || cell->parameters.at("\\Y_WIDTH").as_int() >= 4)
+			if (cell->type.in(ID($mul), ID($div), ID($mod), ID($divfloor), ID($modfloor))) {
+				if (config.opt_aggressive || cell->parameters.at(ID::Y_WIDTH).as_int() >= 4)
 					shareable_cells.insert(cell);
 				continue;
 			}
 
-			if (cell->type == "$shl" || cell->type == "$shr" || cell->type == "$sshl" || cell->type == "$sshr") {
-				if (config.opt_aggressive || cell->parameters.at("\\Y_WIDTH").as_int() >= 8)
+			if (cell->type.in(ID($shl), ID($shr), ID($sshl), ID($sshr))) {
+				if (config.opt_aggressive || cell->parameters.at(ID::Y_WIDTH).as_int() >= 8)
 					shareable_cells.insert(cell);
 				continue;
 			}
@@ -401,9 +401,12 @@ struct ShareWorker
 		if (c1->type != c2->type)
 			return false;
 
-		if (c1->type == "$memrd")
+		if (c1->type.in(ID($memrd), ID($memrd_v2)))
 		{
-			if (c1->parameters.at("\\MEMID").decode_string() != c2->parameters.at("\\MEMID").decode_string())
+			if (c1->parameters.at(ID::MEMID).decode_string() != c2->parameters.at(ID::MEMID).decode_string())
+				return false;
+
+			if (c1->parameters.at(ID::WIDTH) != c2->parameters.at(ID::WIDTH))
 				return false;
 
 			return true;
@@ -413,11 +416,11 @@ struct ShareWorker
 		{
 			if (!config.opt_aggressive)
 			{
-				int a1_width = c1->parameters.at("\\A_WIDTH").as_int();
-				int y1_width = c1->parameters.at("\\Y_WIDTH").as_int();
+				int a1_width = c1->parameters.at(ID::A_WIDTH).as_int();
+				int y1_width = c1->parameters.at(ID::Y_WIDTH).as_int();
 
-				int a2_width = c2->parameters.at("\\A_WIDTH").as_int();
-				int y2_width = c2->parameters.at("\\Y_WIDTH").as_int();
+				int a2_width = c2->parameters.at(ID::A_WIDTH).as_int();
+				int y2_width = c2->parameters.at(ID::Y_WIDTH).as_int();
 
 				if (max(a1_width, a2_width) > 2 * min(a1_width, a2_width)) return false;
 				if (max(y1_width, y2_width) > 2 * min(y1_width, y2_width)) return false;
@@ -426,17 +429,17 @@ struct ShareWorker
 			return true;
 		}
 
-		if (config.generic_bin_ops.count(c1->type) || c1->type == "$alu")
+		if (config.generic_bin_ops.count(c1->type) || c1->type == ID($alu))
 		{
 			if (!config.opt_aggressive)
 			{
-				int a1_width = c1->parameters.at("\\A_WIDTH").as_int();
-				int b1_width = c1->parameters.at("\\B_WIDTH").as_int();
-				int y1_width = c1->parameters.at("\\Y_WIDTH").as_int();
+				int a1_width = c1->parameters.at(ID::A_WIDTH).as_int();
+				int b1_width = c1->parameters.at(ID::B_WIDTH).as_int();
+				int y1_width = c1->parameters.at(ID::Y_WIDTH).as_int();
 
-				int a2_width = c2->parameters.at("\\A_WIDTH").as_int();
-				int b2_width = c2->parameters.at("\\B_WIDTH").as_int();
-				int y2_width = c2->parameters.at("\\Y_WIDTH").as_int();
+				int a2_width = c2->parameters.at(ID::A_WIDTH).as_int();
+				int b2_width = c2->parameters.at(ID::B_WIDTH).as_int();
+				int y2_width = c2->parameters.at(ID::Y_WIDTH).as_int();
 
 				if (max(a1_width, a2_width) > 2 * min(a1_width, a2_width)) return false;
 				if (max(b1_width, b2_width) > 2 * min(b1_width, b2_width)) return false;
@@ -450,13 +453,13 @@ struct ShareWorker
 		{
 			if (!config.opt_aggressive)
 			{
-				int a1_width = c1->parameters.at("\\A_WIDTH").as_int();
-				int b1_width = c1->parameters.at("\\B_WIDTH").as_int();
-				int y1_width = c1->parameters.at("\\Y_WIDTH").as_int();
+				int a1_width = c1->parameters.at(ID::A_WIDTH).as_int();
+				int b1_width = c1->parameters.at(ID::B_WIDTH).as_int();
+				int y1_width = c1->parameters.at(ID::Y_WIDTH).as_int();
 
-				int a2_width = c2->parameters.at("\\A_WIDTH").as_int();
-				int b2_width = c2->parameters.at("\\B_WIDTH").as_int();
-				int y2_width = c2->parameters.at("\\Y_WIDTH").as_int();
+				int a2_width = c2->parameters.at(ID::A_WIDTH).as_int();
+				int b2_width = c2->parameters.at(ID::B_WIDTH).as_int();
+				int y2_width = c2->parameters.at(ID::Y_WIDTH).as_int();
 
 				int min1_width = min(a1_width, b1_width);
 				int max1_width = max(a1_width, b1_width);
@@ -472,7 +475,7 @@ struct ShareWorker
 			return true;
 		}
 
-		if (c1->type == "$macc")
+		if (c1->type == ID($macc))
 		{
 			if (!config.opt_aggressive)
 				if (share_macc(c1, c2) > 2 * min(bits_macc(c1), bits_macc(c2))) return false;
@@ -510,27 +513,27 @@ struct ShareWorker
 
 		if (config.generic_uni_ops.count(c1->type))
 		{
-			if (c1->parameters.at("\\A_SIGNED").as_bool() != c2->parameters.at("\\A_SIGNED").as_bool())
+			if (c1->parameters.at(ID::A_SIGNED).as_bool() != c2->parameters.at(ID::A_SIGNED).as_bool())
 			{
-				RTLIL::Cell *unsigned_cell = c1->parameters.at("\\A_SIGNED").as_bool() ? c2 : c1;
-				if (unsigned_cell->getPort("\\A").to_sigbit_vector().back() != RTLIL::State::S0) {
-					unsigned_cell->parameters.at("\\A_WIDTH") = unsigned_cell->parameters.at("\\A_WIDTH").as_int() + 1;
-					RTLIL::SigSpec new_a = unsigned_cell->getPort("\\A");
-					new_a.append_bit(RTLIL::State::S0);
-					unsigned_cell->setPort("\\A", new_a);
+				RTLIL::Cell *unsigned_cell = c1->parameters.at(ID::A_SIGNED).as_bool() ? c2 : c1;
+				if (unsigned_cell->getPort(ID::A).to_sigbit_vector().back() != RTLIL::State::S0) {
+					unsigned_cell->parameters.at(ID::A_WIDTH) = unsigned_cell->parameters.at(ID::A_WIDTH).as_int() + 1;
+					RTLIL::SigSpec new_a = unsigned_cell->getPort(ID::A);
+					new_a.append(RTLIL::State::S0);
+					unsigned_cell->setPort(ID::A, new_a);
 				}
-				unsigned_cell->parameters.at("\\A_SIGNED") = true;
+				unsigned_cell->parameters.at(ID::A_SIGNED) = true;
 				unsigned_cell->check();
 			}
 
-			bool a_signed = c1->parameters.at("\\A_SIGNED").as_bool();
-			log_assert(a_signed == c2->parameters.at("\\A_SIGNED").as_bool());
+			bool a_signed = c1->parameters.at(ID::A_SIGNED).as_bool();
+			log_assert(a_signed == c2->parameters.at(ID::A_SIGNED).as_bool());
 
-			RTLIL::SigSpec a1 = c1->getPort("\\A");
-			RTLIL::SigSpec y1 = c1->getPort("\\Y");
+			RTLIL::SigSpec a1 = c1->getPort(ID::A);
+			RTLIL::SigSpec y1 = c1->getPort(ID::Y);
 
-			RTLIL::SigSpec a2 = c2->getPort("\\A");
-			RTLIL::SigSpec y2 = c2->getPort("\\Y");
+			RTLIL::SigSpec a2 = c2->getPort(ID::A);
+			RTLIL::SigSpec y2 = c2->getPort(ID::Y);
 
 			int a_width = max(a1.size(), a2.size());
 			int y_width = max(y1.size(), y2.size());
@@ -544,11 +547,11 @@ struct ShareWorker
 			RTLIL::Wire *y = module->addWire(NEW_ID, y_width);
 
 			RTLIL::Cell *supercell = module->addCell(NEW_ID, c1->type);
-			supercell->parameters["\\A_SIGNED"] = a_signed;
-			supercell->parameters["\\A_WIDTH"] = a_width;
-			supercell->parameters["\\Y_WIDTH"] = y_width;
-			supercell->setPort("\\A", a);
-			supercell->setPort("\\Y", y);
+			supercell->parameters[ID::A_SIGNED] = a_signed;
+			supercell->parameters[ID::A_WIDTH] = a_width;
+			supercell->parameters[ID::Y_WIDTH] = y_width;
+			supercell->setPort(ID::A, a);
+			supercell->setPort(ID::Y, y);
 
 			supercell_aux.insert(module->addPos(NEW_ID, y, y1));
 			supercell_aux.insert(module->addPos(NEW_ID, y, y2));
@@ -557,54 +560,54 @@ struct ShareWorker
 			return supercell;
 		}
 
-		if (config.generic_bin_ops.count(c1->type) || config.generic_cbin_ops.count(c1->type) || c1->type == "$alu")
+		if (config.generic_bin_ops.count(c1->type) || config.generic_cbin_ops.count(c1->type) || c1->type == ID($alu))
 		{
 			bool modified_src_cells = false;
 
 			if (config.generic_cbin_ops.count(c1->type))
 			{
-				int score_unflipped = max(c1->parameters.at("\\A_WIDTH").as_int(), c2->parameters.at("\\A_WIDTH").as_int()) +
-						max(c1->parameters.at("\\B_WIDTH").as_int(), c2->parameters.at("\\B_WIDTH").as_int());
+				int score_unflipped = max(c1->parameters.at(ID::A_WIDTH).as_int(), c2->parameters.at(ID::A_WIDTH).as_int()) +
+						max(c1->parameters.at(ID::B_WIDTH).as_int(), c2->parameters.at(ID::B_WIDTH).as_int());
 
-				int score_flipped = max(c1->parameters.at("\\A_WIDTH").as_int(), c2->parameters.at("\\B_WIDTH").as_int()) +
-						max(c1->parameters.at("\\B_WIDTH").as_int(), c2->parameters.at("\\A_WIDTH").as_int());
+				int score_flipped = max(c1->parameters.at(ID::A_WIDTH).as_int(), c2->parameters.at(ID::B_WIDTH).as_int()) +
+						max(c1->parameters.at(ID::B_WIDTH).as_int(), c2->parameters.at(ID::A_WIDTH).as_int());
 
 				if (score_flipped < score_unflipped)
 				{
-					RTLIL::SigSpec tmp = c2->getPort("\\A");
-					c2->setPort("\\A", c2->getPort("\\B"));
-					c2->setPort("\\B", tmp);
+					RTLIL::SigSpec tmp = c2->getPort(ID::A);
+					c2->setPort(ID::A, c2->getPort(ID::B));
+					c2->setPort(ID::B, tmp);
 
-					std::swap(c2->parameters.at("\\A_WIDTH"), c2->parameters.at("\\B_WIDTH"));
-					std::swap(c2->parameters.at("\\A_SIGNED"), c2->parameters.at("\\B_SIGNED"));
+					std::swap(c2->parameters.at(ID::A_WIDTH), c2->parameters.at(ID::B_WIDTH));
+					std::swap(c2->parameters.at(ID::A_SIGNED), c2->parameters.at(ID::B_SIGNED));
 					modified_src_cells = true;
 				}
 			}
 
-			if (c1->parameters.at("\\A_SIGNED").as_bool() != c2->parameters.at("\\A_SIGNED").as_bool())
+			if (c1->parameters.at(ID::A_SIGNED).as_bool() != c2->parameters.at(ID::A_SIGNED).as_bool())
 
 			{
-				RTLIL::Cell *unsigned_cell = c1->parameters.at("\\A_SIGNED").as_bool() ? c2 : c1;
-				if (unsigned_cell->getPort("\\A").to_sigbit_vector().back() != RTLIL::State::S0) {
-					unsigned_cell->parameters.at("\\A_WIDTH") = unsigned_cell->parameters.at("\\A_WIDTH").as_int() + 1;
-					RTLIL::SigSpec new_a = unsigned_cell->getPort("\\A");
-					new_a.append_bit(RTLIL::State::S0);
-					unsigned_cell->setPort("\\A", new_a);
+				RTLIL::Cell *unsigned_cell = c1->parameters.at(ID::A_SIGNED).as_bool() ? c2 : c1;
+				if (unsigned_cell->getPort(ID::A).to_sigbit_vector().back() != RTLIL::State::S0) {
+					unsigned_cell->parameters.at(ID::A_WIDTH) = unsigned_cell->parameters.at(ID::A_WIDTH).as_int() + 1;
+					RTLIL::SigSpec new_a = unsigned_cell->getPort(ID::A);
+					new_a.append(RTLIL::State::S0);
+					unsigned_cell->setPort(ID::A, new_a);
 				}
-				unsigned_cell->parameters.at("\\A_SIGNED") = true;
+				unsigned_cell->parameters.at(ID::A_SIGNED) = true;
 				modified_src_cells = true;
 			}
 
-			if (c1->parameters.at("\\B_SIGNED").as_bool() != c2->parameters.at("\\B_SIGNED").as_bool())
+			if (c1->parameters.at(ID::B_SIGNED).as_bool() != c2->parameters.at(ID::B_SIGNED).as_bool())
 			{
-				RTLIL::Cell *unsigned_cell = c1->parameters.at("\\B_SIGNED").as_bool() ? c2 : c1;
-				if (unsigned_cell->getPort("\\B").to_sigbit_vector().back() != RTLIL::State::S0) {
-					unsigned_cell->parameters.at("\\B_WIDTH") = unsigned_cell->parameters.at("\\B_WIDTH").as_int() + 1;
-					RTLIL::SigSpec new_b = unsigned_cell->getPort("\\B");
-					new_b.append_bit(RTLIL::State::S0);
-					unsigned_cell->setPort("\\B", new_b);
+				RTLIL::Cell *unsigned_cell = c1->parameters.at(ID::B_SIGNED).as_bool() ? c2 : c1;
+				if (unsigned_cell->getPort(ID::B).to_sigbit_vector().back() != RTLIL::State::S0) {
+					unsigned_cell->parameters.at(ID::B_WIDTH) = unsigned_cell->parameters.at(ID::B_WIDTH).as_int() + 1;
+					RTLIL::SigSpec new_b = unsigned_cell->getPort(ID::B);
+					new_b.append(RTLIL::State::S0);
+					unsigned_cell->setPort(ID::B, new_b);
 				}
-				unsigned_cell->parameters.at("\\B_SIGNED") = true;
+				unsigned_cell->parameters.at(ID::B_SIGNED) = true;
 				modified_src_cells = true;
 			}
 
@@ -613,28 +616,28 @@ struct ShareWorker
 				c2->check();
 			}
 
-			bool a_signed = c1->parameters.at("\\A_SIGNED").as_bool();
-			bool b_signed = c1->parameters.at("\\B_SIGNED").as_bool();
+			bool a_signed = c1->parameters.at(ID::A_SIGNED).as_bool();
+			bool b_signed = c1->parameters.at(ID::B_SIGNED).as_bool();
 
-			log_assert(a_signed == c2->parameters.at("\\A_SIGNED").as_bool());
-			log_assert(b_signed == c2->parameters.at("\\B_SIGNED").as_bool());
+			log_assert(a_signed == c2->parameters.at(ID::A_SIGNED).as_bool());
+			log_assert(b_signed == c2->parameters.at(ID::B_SIGNED).as_bool());
 
-			if (c1->type == "$shl" || c1->type == "$shr" || c1->type == "$sshl" || c1->type == "$sshr")
+			if (c1->type == ID($shl) || c1->type == ID($shr) || c1->type == ID($sshl) || c1->type == ID($sshr))
 				b_signed = false;
 
-			RTLIL::SigSpec a1 = c1->getPort("\\A");
-			RTLIL::SigSpec b1 = c1->getPort("\\B");
-			RTLIL::SigSpec y1 = c1->getPort("\\Y");
+			RTLIL::SigSpec a1 = c1->getPort(ID::A);
+			RTLIL::SigSpec b1 = c1->getPort(ID::B);
+			RTLIL::SigSpec y1 = c1->getPort(ID::Y);
 
-			RTLIL::SigSpec a2 = c2->getPort("\\A");
-			RTLIL::SigSpec b2 = c2->getPort("\\B");
-			RTLIL::SigSpec y2 = c2->getPort("\\Y");
+			RTLIL::SigSpec a2 = c2->getPort(ID::A);
+			RTLIL::SigSpec b2 = c2->getPort(ID::B);
+			RTLIL::SigSpec y2 = c2->getPort(ID::Y);
 
 			int a_width = max(a1.size(), a2.size());
 			int b_width = max(b1.size(), b2.size());
 			int y_width = max(y1.size(), y2.size());
 
-			if (c1->type == "$shr" && a_signed)
+			if (c1->type == ID($shr) && a_signed)
 			{
 				a_width = max(y_width, a_width);
 
@@ -660,43 +663,43 @@ struct ShareWorker
 			supercell_aux.insert(module->addMux(NEW_ID, b2, b1, act, b));
 
 			RTLIL::Wire *y = module->addWire(NEW_ID, y_width);
-			RTLIL::Wire *x = c1->type == "$alu" ? module->addWire(NEW_ID, y_width) : nullptr;
-			RTLIL::Wire *co = c1->type == "$alu" ? module->addWire(NEW_ID, y_width) : nullptr;
+			RTLIL::Wire *x = c1->type == ID($alu) ? module->addWire(NEW_ID, y_width) : nullptr;
+			RTLIL::Wire *co = c1->type == ID($alu) ? module->addWire(NEW_ID, y_width) : nullptr;
 
 			RTLIL::Cell *supercell = module->addCell(NEW_ID, c1->type);
-			supercell->parameters["\\A_SIGNED"] = a_signed;
-			supercell->parameters["\\B_SIGNED"] = b_signed;
-			supercell->parameters["\\A_WIDTH"] = a_width;
-			supercell->parameters["\\B_WIDTH"] = b_width;
-			supercell->parameters["\\Y_WIDTH"] = y_width;
-			supercell->setPort("\\A", a);
-			supercell->setPort("\\B", b);
-			supercell->setPort("\\Y", y);
-			if (c1->type == "$alu") {
+			supercell->parameters[ID::A_SIGNED] = a_signed;
+			supercell->parameters[ID::B_SIGNED] = b_signed;
+			supercell->parameters[ID::A_WIDTH] = a_width;
+			supercell->parameters[ID::B_WIDTH] = b_width;
+			supercell->parameters[ID::Y_WIDTH] = y_width;
+			supercell->setPort(ID::A, a);
+			supercell->setPort(ID::B, b);
+			supercell->setPort(ID::Y, y);
+			if (c1->type == ID($alu)) {
 				RTLIL::Wire *ci = module->addWire(NEW_ID), *bi = module->addWire(NEW_ID);
-				supercell_aux.insert(module->addMux(NEW_ID, c2->getPort("\\CI"), c1->getPort("\\CI"), act, ci));
-				supercell_aux.insert(module->addMux(NEW_ID, c2->getPort("\\BI"), c1->getPort("\\BI"), act, bi));
-				supercell->setPort("\\CI", ci);
-				supercell->setPort("\\BI", bi);
-				supercell->setPort("\\CO", co);
-				supercell->setPort("\\X", x);
+				supercell_aux.insert(module->addMux(NEW_ID, c2->getPort(ID::CI), c1->getPort(ID::CI), act, ci));
+				supercell_aux.insert(module->addMux(NEW_ID, c2->getPort(ID::BI), c1->getPort(ID::BI), act, bi));
+				supercell->setPort(ID::CI, ci);
+				supercell->setPort(ID::BI, bi);
+				supercell->setPort(ID::CO, co);
+				supercell->setPort(ID::X, x);
 			}
 			supercell->check();
 
 			supercell_aux.insert(module->addPos(NEW_ID, y, y1));
 			supercell_aux.insert(module->addPos(NEW_ID, y, y2));
-			if (c1->type == "$alu") {
-				supercell_aux.insert(module->addPos(NEW_ID, co, c1->getPort("\\CO")));
-				supercell_aux.insert(module->addPos(NEW_ID, co, c2->getPort("\\CO")));
-				supercell_aux.insert(module->addPos(NEW_ID, x, c1->getPort("\\X")));
-				supercell_aux.insert(module->addPos(NEW_ID, x, c2->getPort("\\X")));
+			if (c1->type == ID($alu)) {
+				supercell_aux.insert(module->addPos(NEW_ID, co, c1->getPort(ID::CO)));
+				supercell_aux.insert(module->addPos(NEW_ID, co, c2->getPort(ID::CO)));
+				supercell_aux.insert(module->addPos(NEW_ID, x, c1->getPort(ID::X)));
+				supercell_aux.insert(module->addPos(NEW_ID, x, c2->getPort(ID::X)));
 			}
 
 			supercell_aux.insert(supercell);
 			return supercell;
 		}
 
-		if (c1->type == "$macc")
+		if (c1->type == ID($macc))
 		{
 			RTLIL::Cell *supercell = module->addCell(NEW_ID, c1->type);
 			supercell_aux.insert(supercell);
@@ -705,18 +708,18 @@ struct ShareWorker
 			return supercell;
 		}
 
-		if (c1->type == "$memrd")
+		if (c1->type.in(ID($memrd), ID($memrd_v2)))
 		{
 			RTLIL::Cell *supercell = module->addCell(NEW_ID, c1);
-			RTLIL::SigSpec addr1 = c1->getPort("\\ADDR");
-			RTLIL::SigSpec addr2 = c2->getPort("\\ADDR");
+			RTLIL::SigSpec addr1 = c1->getPort(ID::ADDR);
+			RTLIL::SigSpec addr2 = c2->getPort(ID::ADDR);
 			if (GetSize(addr1) < GetSize(addr2))
 				addr1.extend_u0(GetSize(addr2));
 			else
 				addr2.extend_u0(GetSize(addr1));
-			supercell->setPort("\\ADDR", addr1 != addr2 ? module->Mux(NEW_ID, addr2, addr1, act) : addr1);
-			supercell->parameters["\\ABITS"] = RTLIL::Const(GetSize(addr1));
-			supercell_aux.insert(module->addPos(NEW_ID, supercell->getPort("\\DATA"), c2->getPort("\\DATA")));
+			supercell->setPort(ID::ADDR, addr1 != addr2 ? module->Mux(NEW_ID, addr2, addr1, act) : addr1);
+			supercell->parameters[ID::ABITS] = RTLIL::Const(GetSize(addr1));
+			supercell_aux.insert(module->addPos(NEW_ID, supercell->getPort(ID::DATA), c2->getPort(ID::DATA)));
 			supercell_aux.insert(supercell);
 			return supercell;
 		}
@@ -747,8 +750,8 @@ struct ShareWorker
 		modwalker.get_consumers(pbits, modwalker.cell_outputs[cell]);
 
 		for (auto &bit : pbits) {
-			if ((bit.cell->type == "$mux" || bit.cell->type == "$pmux") && bit.port == "\\S")
-				forbidden_controls_cache[cell].insert(bit.cell->getPort("\\S").extract(bit.offset, 1));
+			if ((bit.cell->type == ID($mux) || bit.cell->type == ID($pmux)) && bit.port == ID::S)
+				forbidden_controls_cache[cell].insert(bit.cell->getPort(ID::S).extract(bit.offset, 1));
 			consumer_cells.insert(bit.cell);
 		}
 
@@ -780,19 +783,20 @@ struct ShareWorker
 		std::vector<RTLIL::SigBit> p_first_bits = p.first;
 		for (int i = 0; i < GetSize(p_first_bits); i++) {
 			RTLIL::SigBit b = p_first_bits[i];
-			RTLIL::State v = p.second.bits[i];
+			RTLIL::State v = p.second[i];
 			if (p_bits.count(b) && p_bits.at(b) != v)
 				return false;
 			p_bits[b] = v;
 		}
 
 		p.first = RTLIL::SigSpec();
-		p.second.bits.clear();
 
+		RTLIL::Const::Builder new_bits(p_bits.size());
 		for (auto &it : p_bits) {
-			p.first.append_bit(it.first);
-			p.second.bits.push_back(it.second);
+			p.first.append(it.first);
+			new_bits.push_back(it.second);
 		}
+		p.second = new_bits.build();
 
 		return true;
 	}
@@ -814,10 +818,10 @@ struct ShareWorker
 			{
 				auto otherval = val;
 
-				if (otherval.bits[i] == State::S0)
-					otherval.bits[i] = State::S1;
-				else if (otherval.bits[i] == State::S1)
-					otherval.bits[i] = State::S0;
+				if (otherval[i] == State::S0)
+					otherval.set(i, State::S1);
+				else if (otherval[i] == State::S1)
+					otherval.set(i, State::S0);
 				else
 					continue;
 
@@ -826,8 +830,11 @@ struct ShareWorker
 					auto newsig = sig;
 					newsig.remove(i);
 
-					auto newval = val;
-					newval.bits.erase(newval.bits.begin() + i);
+					RTLIL::Const::Builder new_bits(val.size() - 1);
+					for (int j = 0; j < val.size(); ++j)
+						if (j != i)
+							new_bits.push_back(val[j]);
+					RTLIL::Const newval = new_bits.build();
 
 					db[newsig].insert(newval);
 					db[sig].erase(otherval);
@@ -852,6 +859,23 @@ struct ShareWorker
 		optimize_activation_patterns(patterns);
 	}
 
+	template<typename Iterator>
+	bool insert_capped(pool<ssc_pair_t>& cache, Iterator begin_pattern, Iterator end_pattern)
+	{
+		if (cache.size() + std::distance(begin_pattern, end_pattern) > config.pattern_limit) {
+			cache.clear();
+			cache.insert(ssc_pair_t());
+			return false;
+		} else {
+			cache.insert(begin_pattern, end_pattern);
+		}
+		return true;
+	}
+	bool insert_capped(pool<ssc_pair_t>& cache, ssc_pair_t pattern)
+	{
+		return insert_capped(cache, &pattern, &pattern + 1);
+	}
+
 	const pool<ssc_pair_t> &find_cell_activation_patterns(RTLIL::Cell *cell, const char *indent)
 	{
 		if (recursion_state.count(cell)) {
@@ -874,7 +898,7 @@ struct ShareWorker
 			}
 			for (auto &pbit : modwalker.signal_consumers[bit]) {
 				log_assert(fwd_ct.cell_known(pbit.cell->type));
-				if ((pbit.cell->type == "$mux" || pbit.cell->type == "$pmux") && (pbit.port == "\\A" || pbit.port == "\\B"))
+				if ((pbit.cell->type == ID($mux) || pbit.cell->type == ID($pmux)) && (pbit.port == ID::A || pbit.port == ID::B))
 					driven_data_muxes.insert(pbit.cell);
 				else
 					driven_cells.insert(pbit.cell);
@@ -890,10 +914,10 @@ struct ShareWorker
 			bool used_in_a = false;
 			std::set<int> used_in_b_parts;
 
-			int width = c->parameters.at("\\WIDTH").as_int();
-			std::vector<RTLIL::SigBit> sig_a = modwalker.sigmap(c->getPort("\\A"));
-			std::vector<RTLIL::SigBit> sig_b = modwalker.sigmap(c->getPort("\\B"));
-			std::vector<RTLIL::SigBit> sig_s = modwalker.sigmap(c->getPort("\\S"));
+			int width = c->parameters.at(ID::WIDTH).as_int();
+			std::vector<RTLIL::SigBit> sig_a = modwalker.sigmap(c->getPort(ID::A));
+			std::vector<RTLIL::SigBit> sig_b = modwalker.sigmap(c->getPort(ID::B));
+			std::vector<RTLIL::SigBit> sig_s = modwalker.sigmap(c->getPort(ID::S));
 
 			for (auto &bit : sig_a)
 				if (cell_out_bits.count(bit))
@@ -906,22 +930,33 @@ struct ShareWorker
 			if (used_in_a)
 				for (auto p : c_patterns) {
 					for (int i = 0; i < GetSize(sig_s); i++)
-						p.first.append_bit(sig_s[i]), p.second.bits.push_back(RTLIL::State::S0);
+						p.first.append(sig_s[i]);
+					p.second.append(RTLIL::Const(RTLIL::State::S0, GetSize(sig_s)));
 					if (sort_check_activation_pattern(p))
-						activation_patterns_cache[cell].insert(p);
+						if (!insert_capped(activation_patterns_cache[cell], p)) {
+							recursion_state.erase(cell);
+							return activation_patterns_cache[cell];
+						}
 				}
 
 			for (int idx : used_in_b_parts)
 				for (auto p : c_patterns) {
-					p.first.append_bit(sig_s[idx]), p.second.bits.push_back(RTLIL::State::S1);
+					p.first.append(sig_s[idx]);
+					p.second.append(RTLIL::Const(RTLIL::State::S1));
 					if (sort_check_activation_pattern(p))
-						activation_patterns_cache[cell].insert(p);
+					if (!insert_capped(activation_patterns_cache[cell], p)) {
+						recursion_state.erase(cell);
+						return activation_patterns_cache[cell];
+					}
 				}
 		}
 
 		for (auto c : driven_cells) {
 			const pool<ssc_pair_t> &c_patterns = find_cell_activation_patterns(c, indent);
-			activation_patterns_cache[cell].insert(c_patterns.begin(), c_patterns.end());
+			if (!insert_capped(activation_patterns_cache[cell], c_patterns.begin(), c_patterns.end())) {
+				recursion_state.erase(cell);
+				return activation_patterns_cache[cell];
+			}
 		}
 
 		log_assert(recursion_state.count(cell) != 0);
@@ -948,7 +983,7 @@ struct ShareWorker
 
 		RTLIL::SigSpec signal;
 		for (auto &bit : all_bits)
-			signal.append_bit(bit);
+			signal.append(bit);
 
 		return signal;
 	}
@@ -960,15 +995,72 @@ struct ShareWorker
 		{
 			std::vector<RTLIL::SigBit> p_first = p.first;
 			ssc_pair_t new_p;
+			RTLIL::Const::Builder new_p_second_bits;
 
 			for (int i = 0; i < GetSize(p_first); i++)
 				if (filter_bits.count(p_first[i]) == 0) {
-					new_p.first.append_bit(p_first[i]);
-					new_p.second.bits.push_back(p.second.bits.at(i));
+					new_p.first.append(p_first[i]);
+					new_p_second_bits.push_back(p.second.at(i));
 				}
+			new_p.second = new_p_second_bits.build();
 
 			out.insert(new_p);
 		}
+	}
+
+	pool<std::pair<SigBit, State>> pattern_bits(const pool<ssc_pair_t> &activation_patterns)
+	{
+		pool<std::pair<SigBit, State>> bits;
+		for (auto const &pattern : activation_patterns) {
+			for (int i = 0; i < GetSize(pattern.second); ++i) {
+				SigBit bit = pattern.first[i];
+				State val = pattern.second[i];
+				bits.emplace(bit, val);
+			}
+		}
+		return bits;
+	}
+
+	bool onesided_restrict_activation_patterns(
+			pool<ssc_pair_t> &activation_patterns, const pool<std::pair<SigBit, State>> &other_bits)
+	{
+		pool<ssc_pair_t> new_activation_patterns;
+
+		bool simplified = false;
+
+		for (auto const &pattern : activation_patterns) {
+			ssc_pair_t new_pair;
+			for (int i = 0; i < GetSize(pattern.second); ++i) {
+				SigBit bit = pattern.first[i];
+				State val = pattern.second[i];
+				if (other_bits.count({bit, val == State::S0 ? State::S1 : State::S0})) {
+					new_pair.first.append(bit);
+					new_pair.second.append(val);
+				} else {
+					simplified = true;
+				}
+			}
+			new_activation_patterns.emplace(std::move(new_pair));
+		}
+
+		activation_patterns = std::move(new_activation_patterns);
+		return simplified;
+	}
+
+	// Only valid if the patterns on their own (i.e. without considering their input cone) are mutually exclusive!
+	bool restrict_activation_patterns(pool<ssc_pair_t> &activation_patterns, pool<ssc_pair_t> &other_activation_patterns)
+	{
+		pool<std::pair<SigBit, State>> bits = pattern_bits(activation_patterns);
+		pool<std::pair<SigBit, State>> other_bits = pattern_bits(other_activation_patterns);
+
+		bool simplified = false;
+		simplified |= onesided_restrict_activation_patterns(activation_patterns, other_bits);
+		simplified |= onesided_restrict_activation_patterns(other_activation_patterns, bits);
+
+		optimize_activation_patterns(activation_patterns);
+		optimize_activation_patterns(other_activation_patterns);
+
+		return simplified;
 	}
 
 	RTLIL::SigSpec make_cell_activation_logic(const pool<ssc_pair_t> &activation_patterns, pool<RTLIL::Cell*> &supercell_aux)
@@ -1031,7 +1123,7 @@ struct ShareWorker
 		}
 
 		bool found_scc = !toposort.sort();
-		topo_cell_drivers = std::move(toposort.database);
+		topo_cell_drivers = toposort.get_database();
 
 		if (found_scc && toposort.analyze_loops)
 			for (auto &loop : toposort.loops) {
@@ -1070,6 +1162,8 @@ struct ShareWorker
 		CellTypes ct;
 		ct.setup_internals();
 		ct.setup_stdcells();
+
+		ModIndex mi(module);
 
 		pool<RTLIL::Cell*> queue, covered;
 		queue.insert(cell);
@@ -1117,13 +1211,9 @@ struct ShareWorker
 		module->remove(cell);
 	}
 
-	ShareWorker(ShareWorkerConfig config, RTLIL::Design *design, RTLIL::Module *module) :
-			config(config), design(design), module(module), mi(module)
+	ShareWorker(ShareWorkerConfig config, RTLIL::Design* design) :
+			config(config), design(design), modwalker(design)
 	{
-	#ifndef NDEBUG
-		bool before_scc = module_has_scc();
-	#endif
-
 		generic_ops.insert(config.generic_uni_ops.begin(), config.generic_uni_ops.end());
 		generic_ops.insert(config.generic_bin_ops.begin(), config.generic_bin_ops.end());
 		generic_ops.insert(config.generic_cbin_ops.begin(), config.generic_cbin_ops.end());
@@ -1132,16 +1222,36 @@ struct ShareWorker
 		fwd_ct.setup_internals();
 
 		cone_ct.setup_internals();
-		cone_ct.cell_types.erase("$mul");
-		cone_ct.cell_types.erase("$mod");
-		cone_ct.cell_types.erase("$div");
-		cone_ct.cell_types.erase("$pow");
-		cone_ct.cell_types.erase("$shl");
-		cone_ct.cell_types.erase("$shr");
-		cone_ct.cell_types.erase("$sshl");
-		cone_ct.cell_types.erase("$sshr");
+		cone_ct.cell_types.erase(ID($mul));
+		cone_ct.cell_types.erase(ID($mod));
+		cone_ct.cell_types.erase(ID($div));
+		cone_ct.cell_types.erase(ID($modfloor));
+		cone_ct.cell_types.erase(ID($divfloor));
+		cone_ct.cell_types.erase(ID($pow));
+		cone_ct.cell_types.erase(ID($shl));
+		cone_ct.cell_types.erase(ID($shr));
+		cone_ct.cell_types.erase(ID($sshl));
+		cone_ct.cell_types.erase(ID($sshr));
+	}
 
-		modwalker.setup(design, module);
+	void operator()(RTLIL::Module *module) {
+		this->module = module;
+
+	#ifndef NDEBUG
+		bool before_scc = module_has_scc();
+	#endif
+
+		limit = config.limit;
+		modwalker.setup(module);
+
+		cells_to_remove.clear();
+		recursion_state.clear();
+		topo_cell_drivers.clear();
+		topo_bit_drivers.clear();
+		terminal_bits.clear();
+		shareable_cells.clear();
+		forbidden_controls_cache.clear();
+		activation_patterns_cache.clear();
 
 		find_terminal_bits();
 		find_shareable_cells();
@@ -1151,13 +1261,6 @@ struct ShareWorker
 
 		log("Found %d cells in module %s that may be considered for resource sharing.\n",
 				GetSize(shareable_cells), log_id(module));
-
-		for (auto cell : module->cells())
-			if (cell->type == "$pmux")
-				for (auto bit : cell->getPort("\\S"))
-				for (auto other_bit : cell->getPort("\\S"))
-					if (bit < other_bit)
-						exclusive_ctrls.push_back(std::pair<RTLIL::SigBit, RTLIL::SigBit>(bit, other_bit));
 
 		while (!shareable_cells.empty() && config.limit != 0)
 		{
@@ -1237,10 +1340,12 @@ struct ShareWorker
 				optimize_activation_patterns(filtered_cell_activation_patterns);
 				optimize_activation_patterns(filtered_other_cell_activation_patterns);
 
-				ezSatPtr ez;
-				SatGen satgen(ez.get(), &modwalker.sigmap);
+				QuickConeSat qcsat(modwalker);
+				if (config.opt_fast) {
+					qcsat.max_cell_outs = 3;
+					qcsat.max_cell_count = 100;
+				}
 
-				pool<RTLIL::Cell*> sat_cells;
 				std::set<RTLIL::SigBit> bits_queue;
 
 				std::vector<int> cell_active, other_cell_active;
@@ -1248,86 +1353,70 @@ struct ShareWorker
 
 				for (auto &p : filtered_cell_activation_patterns) {
 					log("      Activation pattern for cell %s: %s = %s\n", log_id(cell), log_signal(p.first), log_signal(p.second));
-					cell_active.push_back(ez->vec_eq(satgen.importSigSpec(p.first), satgen.importSigSpec(p.second)));
+					cell_active.push_back(qcsat.ez->vec_eq(qcsat.importSig(p.first), qcsat.importSig(p.second)));
 					all_ctrl_signals.append(p.first);
 				}
 
 				for (auto &p : filtered_other_cell_activation_patterns) {
 					log("      Activation pattern for cell %s: %s = %s\n", log_id(other_cell), log_signal(p.first), log_signal(p.second));
-					other_cell_active.push_back(ez->vec_eq(satgen.importSigSpec(p.first), satgen.importSigSpec(p.second)));
+					other_cell_active.push_back(qcsat.ez->vec_eq(qcsat.importSig(p.first), qcsat.importSig(p.second)));
 					all_ctrl_signals.append(p.first);
 				}
+				int sub1 = qcsat.ez->expression(qcsat.ez->OpOr, cell_active);
+				int sub2 = qcsat.ez->expression(qcsat.ez->OpOr, other_cell_active);
 
-				for (auto &bit : cell_activation_signals.to_sigbit_vector())
-					bits_queue.insert(bit);
+				bool pattern_only_solve = qcsat.ez->solve(qcsat.ez->AND(sub1, sub2));
+				qcsat.prepare();
 
-				for (auto &bit : other_cell_activation_signals.to_sigbit_vector())
-					bits_queue.insert(bit);
-
-				while (!bits_queue.empty())
-				{
-					pool<ModWalker::PortBit> portbits;
-					modwalker.get_drivers(portbits, bits_queue);
-					bits_queue.clear();
-
-					for (auto &pbit : portbits)
-						if (sat_cells.count(pbit.cell) == 0 && cone_ct.cell_known(pbit.cell->type)) {
-							if (config.opt_fast && modwalker.cell_outputs[pbit.cell].size() >= 4)
-								continue;
-							// log("      Adding cell %s (%s) to SAT problem.\n", log_id(pbit.cell), log_id(pbit.cell->type));
-							bits_queue.insert(modwalker.cell_inputs[pbit.cell].begin(), modwalker.cell_inputs[pbit.cell].end());
-							satgen.importCell(pbit.cell);
-							sat_cells.insert(pbit.cell);
-						}
-
-					if (config.opt_fast && sat_cells.size() > 100)
-						break;
-				}
-
-				for (auto it : exclusive_ctrls)
-					if (satgen.importedSigBit(it.first) && satgen.importedSigBit(it.second)) {
-						log("      Adding exclusive control bits: %s vs. %s\n", log_signal(it.first), log_signal(it.second));
-						int sub1 = satgen.importSigBit(it.first);
-						int sub2 = satgen.importSigBit(it.second);
-						ez->assume(ez->NOT(ez->AND(sub1, sub2)));
-					}
-
-				if (!ez->solve(ez->expression(ez->OpOr, cell_active))) {
+				if (!qcsat.ez->solve(sub1)) {
 					log("      According to the SAT solver the cell %s is never active. Sharing is pointless, we simply remove it.\n", log_id(cell));
 					cells_to_remove.insert(cell);
 					break;
 				}
 
-				if (!ez->solve(ez->expression(ez->OpOr, other_cell_active))) {
+				if (!qcsat.ez->solve(sub2)) {
 					log("      According to the SAT solver the cell %s is never active. Sharing is pointless, we simply remove it.\n", log_id(other_cell));
 					cells_to_remove.insert(other_cell);
 					shareable_cells.erase(other_cell);
 					continue;
 				}
 
-				ez->non_incremental();
+				pool<ssc_pair_t> optimized_cell_activation_patterns = filtered_cell_activation_patterns;
+				pool<ssc_pair_t> optimized_other_cell_activation_patterns = filtered_other_cell_activation_patterns;
 
-				all_ctrl_signals.sort_and_unify();
-				std::vector<int> sat_model = satgen.importSigSpec(all_ctrl_signals);
-				std::vector<bool> sat_model_values;
+				if (pattern_only_solve) {
+					qcsat.ez->non_incremental();
 
-				int sub1 = ez->expression(ez->OpOr, cell_active);
-				int sub2 = ez->expression(ez->OpOr, other_cell_active);
-				ez->assume(ez->AND(sub1, sub2));
+					all_ctrl_signals.sort_and_unify();
+					std::vector<int> sat_model = qcsat.importSig(all_ctrl_signals);
+					std::vector<bool> sat_model_values;
 
-				log("      Size of SAT problem: %d cells, %d variables, %d clauses\n",
-						GetSize(sat_cells), ez->numCnfVariables(), ez->numCnfClauses());
+					qcsat.ez->assume(qcsat.ez->AND(sub1, sub2));
 
-				if (ez->solve(sat_model, sat_model_values)) {
-					log("      According to the SAT solver this pair of cells can not be shared.\n");
-					log("      Model from SAT solver: %s = %d'", log_signal(all_ctrl_signals), GetSize(sat_model_values));
-					for (int i = GetSize(sat_model_values)-1; i >= 0; i--)
-						log("%c", sat_model_values[i] ? '1' : '0');
-					log("\n");
-					continue;
+					log("      Size of SAT problem: %zu cells, %d variables, %d clauses\n",
+							qcsat.imported_cells.size(), qcsat.ez->numCnfVariables(), qcsat.ez->numCnfClauses());
+
+					if (qcsat.ez->solve(sat_model, sat_model_values)) {
+						log("      According to the SAT solver this pair of cells can not be shared.\n");
+						log("      Model from SAT solver: %s = %d'", log_signal(all_ctrl_signals), GetSize(sat_model_values));
+						for (int i = GetSize(sat_model_values)-1; i >= 0; i--)
+							log("%c", sat_model_values[i] ? '1' : '0');
+						log("\n");
+						continue;
+					}
+
+					log("      According to the SAT solver this pair of cells can be shared.\n");
+				} else {
+					log("      According to the SAT solver this pair of cells can be shared. (Pattern only case)\n");
+
+					if (restrict_activation_patterns(optimized_cell_activation_patterns, optimized_other_cell_activation_patterns)) {
+						for (auto &p : optimized_cell_activation_patterns)
+							log("      Simplified activation pattern for cell %s: %s = %s\n", log_id(cell), log_signal(p.first), log_signal(p.second));
+
+						for (auto &p : optimized_other_cell_activation_patterns)
+							log("      Simplified activation pattern for cell %s: %s = %s\n", log_id(other_cell), log_signal(p.first), log_signal(p.second));
+					}
 				}
-
-				log("      According to the SAT solver this pair of cells can be shared.\n");
 
 				if (find_in_input_cone(cell, other_cell)) {
 					log("      Sharing not possible: %s is in input cone of %s.\n", log_id(other_cell), log_id(cell));
@@ -1344,20 +1433,20 @@ struct ShareWorker
 				int cell_select_score = 0;
 				int other_cell_select_score = 0;
 
-				for (auto &p : filtered_cell_activation_patterns)
+				for (auto &p : optimized_cell_activation_patterns)
 					cell_select_score += p.first.size();
 
-				for (auto &p : filtered_other_cell_activation_patterns)
+				for (auto &p : optimized_other_cell_activation_patterns)
 					other_cell_select_score += p.first.size();
 
 				RTLIL::Cell *supercell;
 				pool<RTLIL::Cell*> supercell_aux;
 				if (cell_select_score <= other_cell_select_score) {
-					RTLIL::SigSpec act = make_cell_activation_logic(filtered_cell_activation_patterns, supercell_aux);
+					RTLIL::SigSpec act = make_cell_activation_logic(optimized_cell_activation_patterns, supercell_aux);
 					supercell = make_supercell(cell, other_cell, act, supercell_aux);
 					log("      Activation signal for %s: %s\n", log_id(cell), log_signal(act));
 				} else {
-					RTLIL::SigSpec act = make_cell_activation_logic(filtered_other_cell_activation_patterns, supercell_aux);
+					RTLIL::SigSpec act = make_cell_activation_logic(optimized_other_cell_activation_patterns, supercell_aux);
 					supercell = make_supercell(other_cell, cell, act, supercell_aux);
 					log("      Activation signal for %s: %s\n", log_id(other_cell), log_signal(act));
 				}
@@ -1399,8 +1488,8 @@ struct ShareWorker
 				topo_cell_drivers[cell] = { supercell };
 				topo_cell_drivers[other_cell] = { supercell };
 
-				if (config.limit > 0)
-					config.limit--;
+				if (limit > 0)
+					limit--;
 
 				break;
 			}
@@ -1425,7 +1514,7 @@ struct ShareWorker
 
 struct SharePass : public Pass {
 	SharePass() : Pass("share", "perform sat-based resource sharing") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -1456,53 +1545,61 @@ struct SharePass : public Pass {
 		log("  -limit N\n");
 		log("    Only perform the first N merges, then stop. This is useful for debugging.\n");
 		log("\n");
+		log("  -pattern-limit N\n");
+		log("    Only analyze up to N activation patterns per cell, otherwise assume active.\n");
+		log("    N is 1000 by default. Higher values may merge more resources at the cost of\n");
+		log("    more runtime and memory consumption.\n");
+		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		ShareWorkerConfig config;
 
 		config.limit = -1;
+		config.pattern_limit = design->scratchpad_get_int("share.pattern_limit", 1000);
 		config.opt_force = false;
 		config.opt_aggressive = false;
 		config.opt_fast = false;
 
-		config.generic_uni_ops.insert("$not");
-		// config.generic_uni_ops.insert("$pos");
-		config.generic_uni_ops.insert("$neg");
+		config.generic_uni_ops.insert(ID($not));
+		// config.generic_uni_ops.insert(ID($pos));
+		config.generic_uni_ops.insert(ID($neg));
 
-		config.generic_cbin_ops.insert("$and");
-		config.generic_cbin_ops.insert("$or");
-		config.generic_cbin_ops.insert("$xor");
-		config.generic_cbin_ops.insert("$xnor");
+		config.generic_cbin_ops.insert(ID($and));
+		config.generic_cbin_ops.insert(ID($or));
+		config.generic_cbin_ops.insert(ID($xor));
+		config.generic_cbin_ops.insert(ID($xnor));
 
-		config.generic_bin_ops.insert("$shl");
-		config.generic_bin_ops.insert("$shr");
-		config.generic_bin_ops.insert("$sshl");
-		config.generic_bin_ops.insert("$sshr");
+		config.generic_bin_ops.insert(ID($shl));
+		config.generic_bin_ops.insert(ID($shr));
+		config.generic_bin_ops.insert(ID($sshl));
+		config.generic_bin_ops.insert(ID($sshr));
 
-		config.generic_bin_ops.insert("$lt");
-		config.generic_bin_ops.insert("$le");
-		config.generic_bin_ops.insert("$eq");
-		config.generic_bin_ops.insert("$ne");
-		config.generic_bin_ops.insert("$eqx");
-		config.generic_bin_ops.insert("$nex");
-		config.generic_bin_ops.insert("$ge");
-		config.generic_bin_ops.insert("$gt");
+		config.generic_bin_ops.insert(ID($lt));
+		config.generic_bin_ops.insert(ID($le));
+		config.generic_bin_ops.insert(ID($eq));
+		config.generic_bin_ops.insert(ID($ne));
+		config.generic_bin_ops.insert(ID($eqx));
+		config.generic_bin_ops.insert(ID($nex));
+		config.generic_bin_ops.insert(ID($ge));
+		config.generic_bin_ops.insert(ID($gt));
 
-		config.generic_cbin_ops.insert("$add");
-		config.generic_cbin_ops.insert("$mul");
+		config.generic_cbin_ops.insert(ID($add));
+		config.generic_cbin_ops.insert(ID($mul));
 
-		config.generic_bin_ops.insert("$sub");
-		config.generic_bin_ops.insert("$div");
-		config.generic_bin_ops.insert("$mod");
-		// config.generic_bin_ops.insert("$pow");
+		config.generic_bin_ops.insert(ID($sub));
+		config.generic_bin_ops.insert(ID($div));
+		config.generic_bin_ops.insert(ID($mod));
+		config.generic_bin_ops.insert(ID($divfloor));
+		config.generic_bin_ops.insert(ID($modfloor));
+		// config.generic_bin_ops.insert(ID($pow));
 
-		config.generic_uni_ops.insert("$logic_not");
-		config.generic_cbin_ops.insert("$logic_and");
-		config.generic_cbin_ops.insert("$logic_or");
+		config.generic_uni_ops.insert(ID($logic_not));
+		config.generic_cbin_ops.insert(ID($logic_and));
+		config.generic_cbin_ops.insert(ID($logic_or));
 
-		config.generic_other_ops.insert("$alu");
-		config.generic_other_ops.insert("$macc");
+		config.generic_other_ops.insert(ID($alu));
+		config.generic_other_ops.insert(ID($macc));
 
 		log_header(design, "Executing SHARE pass (SAT-based resource sharing).\n");
 
@@ -1524,13 +1621,18 @@ struct SharePass : public Pass {
 				config.limit = atoi(args[++argidx].c_str());
 				continue;
 			}
+			if (args[argidx] == "-pattern-limit" && argidx+1 < args.size()) {
+				config.pattern_limit = atoi(args[++argidx].c_str());
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
-		for (auto &mod_it : design->modules_)
-			if (design->selected(mod_it.second))
-				ShareWorker(config, design, mod_it.second);
+		ShareWorker sw(config, design);
+
+		for (auto module : design->selected_modules())
+			sw(module);
 	}
 } SharePass;
 

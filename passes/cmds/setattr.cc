@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -34,12 +34,12 @@ struct setunset_t
 
 	setunset_t(std::string set_name, std::string set_value) : name(RTLIL::escape_id(set_name)), value(), unset(false)
 	{
-		if (set_value.substr(0, 1) == "\"" && set_value.substr(GetSize(set_value)-1) == "\"") {
+		if (set_value.compare(0, 1, "\"") == 0 && set_value.compare(GetSize(set_value)-1, std::string::npos, "\"") == 0) {
 			value = RTLIL::Const(set_value.substr(1, GetSize(set_value)-2));
 		} else {
 			RTLIL::SigSpec sig_value;
-			if (!RTLIL::SigSpec::parse(sig_value, NULL, set_value))
-				log_cmd_error("Can't decode value '%s'!\n", set_value.c_str());
+			if (!RTLIL::SigSpec::parse(sig_value, nullptr, set_value))
+				log_cmd_error("Can't decode value '%s'!\n", set_value);
 			value = sig_value.as_const();
 		}
 	}
@@ -56,7 +56,7 @@ static void do_setunset(dict<RTLIL::IdString, RTLIL::Const> &attrs, const std::v
 
 struct SetattrPass : public Pass {
 	SetattrPass() : Pass("setattr", "set/unset attributes on objects") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -69,7 +69,7 @@ struct SetattrPass : public Pass {
 		log("instead of objects within modules.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::vector<setunset_t> setunset_list;
 		bool flag_mod = false;
@@ -96,41 +96,54 @@ struct SetattrPass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
-		for (auto &mod : design->modules_)
+		for (auto module : design->all_selected_modules())
 		{
-			RTLIL::Module *module = mod.second;
-
 			if (flag_mod) {
-				if (design->selected_whole_module(module->name))
+				if (module->is_selected_whole())
 					do_setunset(module->attributes, setunset_list);
 				continue;
 			}
 
-			if (!design->selected(module))
-				continue;
-
-			for (auto &it : module->wires_)
-				if (design->selected(module, it.second))
-					do_setunset(it.second->attributes, setunset_list);
-
-			for (auto &it : module->memories)
-				if (design->selected(module, it.second))
-					do_setunset(it.second->attributes, setunset_list);
-
-			for (auto &it : module->cells_)
-				if (design->selected(module, it.second))
-					do_setunset(it.second->attributes, setunset_list);
-
-			for (auto &it : module->processes)
-				if (design->selected(module, it.second))
-					do_setunset(it.second->attributes, setunset_list);
+			for (auto memb : module->selected_members())
+				do_setunset(memb->attributes, setunset_list);
 		}
 	}
 } SetattrPass;
 
+struct WbflipPass : public Pass {
+	WbflipPass() : Pass("wbflip", "flip the whitebox attribute") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    wbflip [selection]\n");
+		log("\n");
+		log("Flip the whitebox attribute on selected cells. I.e. if it's set, unset it, and\n");
+		log("vice-versa. Blackbox cells are not effected by this command.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		size_t argidx;
+		for (argidx = 1; argidx < args.size(); argidx++)
+		{
+			std::string arg = args[argidx];
+			// if (arg == "-mod") {
+			// 	flag_mod = true;
+			// 	continue;
+			// }
+			break;
+		}
+		extra_args(args, argidx, design);
+
+		for (auto *module : design->selected_modules(RTLIL::SELECT_ALL, RTLIL::SB_EXCL_BB_ONLY))
+			module->set_bool_attribute(ID::whitebox, !module->get_bool_attribute(ID::whitebox));
+	}
+} WbflipPass;
+
 struct SetparamPass : public Pass {
 	SetparamPass() : Pass("setparam", "set/unset parameters on objects") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -142,7 +155,7 @@ struct SetparamPass : public Pass {
 		log("The -type option can be used to change the cell type of the selected cells.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		vector<setunset_t> setunset_list;
 		string new_cell_type;
@@ -169,26 +182,20 @@ struct SetparamPass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
-		for (auto &mod : design->modules_)
+		for (auto module : design->selected_modules())
 		{
-			RTLIL::Module *module = mod.second;
-
-			if (!design->selected(module))
-				continue;
-
-			for (auto &it : module->cells_)
-				if (design->selected(module, it.second)) {
-					if (!new_cell_type.empty())
-						it.second->type = new_cell_type;
-					do_setunset(it.second->parameters, setunset_list);
-				}
+			for (auto cell : module->selected_cells()) {
+				if (!new_cell_type.empty())
+					cell->type = new_cell_type;
+				do_setunset(cell->parameters, setunset_list);
+			}
 		}
 	}
 } SetparamPass;
 
 struct ChparamPass : public Pass {
 	ChparamPass() : Pass("chparam", "re-evaluate modules with new parameters") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -203,7 +210,7 @@ struct ChparamPass : public Pass {
 		log("List the available parameters of the selected modules.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::vector<setunset_t> setunset_list;
 		dict<RTLIL::IdString, RTLIL::Const> new_parameters;

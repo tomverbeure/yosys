@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -23,8 +23,8 @@ USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 struct BlackboxPass : public Pass {
-	BlackboxPass() : Pass("blackbox", "change type of cells in the design") { }
-	void help() YS_OVERRIDE
+	BlackboxPass() : Pass("blackbox", "convert modules into blackbox modules") { }
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -34,7 +34,7 @@ struct BlackboxPass : public Pass {
 		log("module attribute).\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
@@ -46,34 +46,11 @@ struct BlackboxPass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
-		for (auto module : design->selected_whole_modules_warn())
+		for (auto module : design->selected_whole_modules_warn(true))
 		{
-			pool<Cell*> remove_cells;
-			pool<Wire*> remove_wires;
-
-			for (auto cell : module->cells())
-				remove_cells.insert(cell);
-
-			for (auto wire : module->wires())
-				if (wire->port_id == 0)
-					remove_wires.insert(wire);
-
-			for (auto it = module->memories.begin(); it != module->memories.end(); ++it)
-				delete it->second;
-			module->memories.clear();
-
-			for (auto it = module->processes.begin(); it != module->processes.end(); ++it)
-				delete it->second;
-			module->processes.clear();
-
-			module->new_connections(std::vector<RTLIL::SigSig>());
-
-			for (auto cell : remove_cells)
-				module->remove(cell);
-
-			module->remove(remove_wires);
-
-			module->set_bool_attribute("\\blackbox");
+			module->makeblackbox();
+			module->set_bool_attribute(ID::blackbox);
+			module->set_bool_attribute(ID::whitebox, false);
 		}
 	}
 } BlackboxPass;

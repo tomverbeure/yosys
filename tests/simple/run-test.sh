@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 OPTIND=1
 seed=""    # default to no seed specified
@@ -12,9 +12,9 @@ done
 shift "$((OPTIND-1))"
 
 # check for Icarus Verilog
-if ! which iverilog > /dev/null ; then
+if ! command -v iverilog > /dev/null ; then
   echo "$0: Error: Icarus Verilog 'iverilog' not found."
   exit 1
 fi
 
-exec ${MAKE:-make} -f ../tools/autotest.mk $seed *.v
+exec ${MAKE:-make} -f ../tools/autotest.mk $seed *.{sv,v}

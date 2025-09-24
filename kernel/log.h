@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -17,17 +17,30 @@
  *
  */
 
-#include "kernel/yosys.h"
-
 #ifndef LOG_H
 #define LOG_H
 
-#include <time.h>
-#include <regex>
+#include "kernel/yosys_common.h"
 
-#ifndef _WIN32
+#include <time.h>
+
+#include <regex>
+#define YS_REGEX_COMPILE(param) std::regex(param, \
+				std::regex_constants::nosubs | \
+				std::regex_constants::optimize | \
+				std::regex_constants::egrep)
+#define YS_REGEX_COMPILE_WITH_SUBS(param) std::regex(param, \
+				std::regex_constants::optimize | \
+				std::regex_constants::egrep)
+
+#if defined(_WIN32)
+#  include <intrin.h>
+#else
 #  include <sys/time.h>
 #  include <sys/resource.h>
+#  if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+#    include <signal.h>
+#  endif
 #endif
 
 #if defined(_MSC_VER)
@@ -44,14 +57,52 @@ YOSYS_NAMESPACE_BEGIN
 #define S__LINE__sub1(x) S__LINE__sub2(x)
 #define S__LINE__ S__LINE__sub1(__LINE__)
 
+// YS_DEBUGTRAP is a macro that is functionally equivalent to a breakpoint
+// if the platform provides such functionality, and does nothing otherwise.
+// If no debugger is attached, it starts a just-in-time debugger if available,
+// and crashes the process otherwise.
+#if defined(_WIN32)
+# define YS_DEBUGTRAP __debugbreak()
+#else
+# ifndef __has_builtin
+// __has_builtin is a GCC/Clang extension; on a different compiler (or old enough GCC/Clang)
+// that does not have it, using __has_builtin(...) is a syntax error.
+#  define __has_builtin(x) 0
+# endif
+# if __has_builtin(__builtin_debugtrap)
+#  define YS_DEBUGTRAP __builtin_debugtrap()
+# elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+#  define YS_DEBUGTRAP raise(SIGTRAP)
+# else
+#  define YS_DEBUGTRAP do {} while(0)
+# endif
+#endif
+
+// YS_DEBUGTRAP_IF_DEBUGGING is a macro that is functionally equivalent to a breakpoint
+// if a debugger is attached, and does nothing otherwise.
+#if defined(_WIN32)
+# define YS_DEBUGTRAP_IF_DEBUGGING do { if (IsDebuggerPresent()) DebugBreak(); } while(0)
+# elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+// There is no reliable (or portable) *nix equivalent of IsDebuggerPresent(). However,
+// debuggers will stop when SIGTRAP is raised, even if the action is set to ignore.
+# define YS_DEBUGTRAP_IF_DEBUGGING do { \
+		auto old = signal(SIGTRAP, SIG_IGN); raise(SIGTRAP); signal(SIGTRAP, old); \
+	} while(0)
+#else
+# define YS_DEBUGTRAP_IF_DEBUGGING do {} while(0)
+#endif
+
 struct log_cmd_error_exception { };
 
 extern std::vector<FILE*> log_files;
 extern std::vector<std::ostream*> log_streams;
+extern std::vector<std::string> log_scratchpads;
 extern std::map<std::string, std::set<std::string>> log_hdump;
 extern std::vector<std::regex> log_warn_regexes, log_nowarn_regexes, log_werror_regexes;
-extern std::set<std::string> log_warnings;
+extern std::set<std::string> log_warnings, log_experimentals, log_experimentals_ignored;
 extern int log_warnings_count;
+extern int log_warnings_count_noexpect;
+extern bool log_expect_no_warnings;
 extern bool log_hdump_all;
 extern FILE *log_errfile;
 extern SHA1 *log_hasher;
@@ -64,23 +115,126 @@ extern int log_verbose_level;
 extern string log_last_error;
 extern void (*log_error_atexit)();
 
-void logv(const char *format, va_list ap);
-void logv_header(RTLIL::Design *design, const char *format, va_list ap);
-void logv_warning(const char *format, va_list ap);
-void logv_warning_noprefix(const char *format, va_list ap);
-YS_NORETURN void logv_error(const char *format, va_list ap) YS_ATTRIBUTE(noreturn);
+extern int log_make_debug;
+extern int log_force_debug;
+extern int log_debug_suppressed;
 
-void log(const char *format, ...)  YS_ATTRIBUTE(format(printf, 1, 2));
-void log_header(RTLIL::Design *design, const char *format, ...) YS_ATTRIBUTE(format(printf, 2, 3));
-void log_warning(const char *format, ...) YS_ATTRIBUTE(format(printf, 1, 2));
+[[deprecated]]
+[[noreturn]] void logv_file_error(const string &filename, int lineno, const char *format, va_list ap);
+
+void set_verific_logging(void (*cb)(int msg_type, const char *message_id, const char* file_path, unsigned int left_line, unsigned int left_col, unsigned int right_line, unsigned int right_col, const char *msg));
+extern void (*log_verific_callback)(int msg_type, const char *message_id, const char* file_path, unsigned int left_line, unsigned int left_col, unsigned int right_line, unsigned int right_col, const char *msg);
+
+#ifndef NDEBUG
+static inline bool ys_debug(int n = 0) { if (log_force_debug) return true; log_debug_suppressed += n; return false; }
+#else
+static inline bool ys_debug(int = 0) { return false; }
+#endif
+#  define log_debug(...) do { if (ys_debug(1)) log(__VA_ARGS__); } while (0)
+
+void log_formatted_string(std::string_view format, std::string str);
+template <typename... Args>
+inline void log(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	if (log_make_debug && !ys_debug(1))
+		return;
+	log_formatted_string(fmt.format_string(), fmt.format(args...));
+}
+
+void log_formatted_header(RTLIL::Design *design, std::string_view format, std::string str);
+template <typename... Args>
+inline void log_header(RTLIL::Design *design, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_header(design, fmt.format_string(), fmt.format(args...));
+}
+
+void log_formatted_warning(std::string_view prefix, std::string str);
+template <typename... Args>
+inline void log_warning(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_warning("Warning: ", fmt.format(args...));
+}
+
+inline void log_formatted_warning_noprefix(std::string str)
+{
+	log_formatted_warning("", str);
+}
+template <typename... Args>
+inline void log_warning_noprefix(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_warning("", fmt.format(args...));
+}
+
+void log_experimental(const std::string &str);
 
 // Log with filename to report a problem in a source file.
-void log_file_warning(const std::string &filename, int lineno, const char *format, ...) YS_ATTRIBUTE(format(printf, 3, 4));
+void log_formatted_file_warning(std::string_view filename, int lineno, std::string str);
+template <typename... Args>
+void log_file_warning(std::string_view filename, int lineno, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_file_warning(filename, lineno, fmt.format(args...));
+}
 
-void log_warning_noprefix(const char *format, ...) YS_ATTRIBUTE(format(printf, 1, 2));
-YS_NORETURN void log_error(const char *format, ...) YS_ATTRIBUTE(format(printf, 1, 2), noreturn);
-void log_file_error(const string &filename, int lineno, const char *format, ...) YS_ATTRIBUTE(format(printf, 3, 4), noreturn);
-YS_NORETURN void log_cmd_error(const char *format, ...) YS_ATTRIBUTE(format(printf, 1, 2), noreturn);
+void log_formatted_file_info(std::string_view filename, int lineno, std::string str);
+template <typename... Args>
+void log_file_info(std::string_view filename, int lineno, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	if (log_make_debug && !ys_debug(1))
+		return;
+	log_formatted_file_info(filename, lineno, fmt.format(args...));
+}
+
+[[noreturn]] void log_formatted_error(std::string str);
+template <typename... Args>
+[[noreturn]] void log_error(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_error(fmt.format(args...));
+}
+
+[[noreturn]] void log_formatted_file_error(std::string_view filename, int lineno, std::string str);
+template <typename... Args>
+[[noreturn]] void log_file_error(std::string_view filename, int lineno, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_file_error(filename, lineno, fmt.format(args...));
+}
+
+[[noreturn]] void log_formatted_cmd_error(std::string str);
+template <typename... Args>
+[[noreturn]] void log_cmd_error(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	log_formatted_cmd_error(fmt.format(args...));
+}
+
+static inline void log_suppressed() {
+	if (log_debug_suppressed && !log_make_debug) {
+		log("<suppressed ~%d debug messages>\n", log_debug_suppressed);
+		log_debug_suppressed = 0;
+	}
+}
+
+struct LogMakeDebugHdl {
+	bool status = false;
+	LogMakeDebugHdl(bool start_on = false) {
+		if (start_on)
+			on();
+	}
+	~LogMakeDebugHdl() {
+		off();
+	}
+	void on() {
+		if (status) return;
+		status=true;
+		log_make_debug++;
+	}
+	void off_silent() {
+		if (!status) return;
+		status=false;
+		log_make_debug--;
+	}
+	void off() {
+		off_silent();
+	}
+};
 
 void log_spacer();
 void log_push();
@@ -90,9 +244,24 @@ void log_backtrace(const char *prefix, int levels);
 void log_reset_stack();
 void log_flush();
 
-const char *log_signal(const RTLIL::SigSpec &sig, bool autoint = true);
-const char *log_const(const RTLIL::Const &value, bool autoint = true);
-const char *log_id(RTLIL::IdString id);
+struct LogExpectedItem
+{
+	LogExpectedItem(const std::regex &pat, int expected) :
+			pattern(pat), expected_count(expected), current_count(0) {}
+	LogExpectedItem() : expected_count(0), current_count(0) {}
+
+	std::regex pattern;
+	int expected_count;
+	int current_count;
+};
+
+extern dict<std::string, LogExpectedItem> log_expect_log, log_expect_warning, log_expect_error;
+extern dict<std::string, LogExpectedItem> log_expect_prefix_log, log_expect_prefix_warning, log_expect_prefix_error;
+void log_check_expected();
+
+std::string log_signal(const RTLIL::SigSpec &sig, bool autoint = true);
+std::string log_const(const RTLIL::Const &value, bool autoint = true);
+const char *log_id(const RTLIL::IdString &id);
 
 template<typename T> static inline const char *log_id(T *obj, const char *nullstr = nullptr) {
 	if (nullstr && obj == nullptr)
@@ -104,16 +273,20 @@ void log_module(RTLIL::Module *module, std::string indent = "");
 void log_cell(RTLIL::Cell *cell, std::string indent = "");
 void log_wire(RTLIL::Wire *wire, std::string indent = "");
 
+[[noreturn]]
+void log_assert_failure(const char *expr, const char *file, int line);
 #ifndef NDEBUG
 static inline void log_assert_worker(bool cond, const char *expr, const char *file, int line) {
-	if (!cond) log_error("Assert `%s' failed in %s:%d.\n", expr, file, line);
+	if (!cond) log_assert_failure(expr, file, line);
 }
 #  define log_assert(_assert_expr_) YOSYS_NAMESPACE_PREFIX log_assert_worker(_assert_expr_, #_assert_expr_, __FILE__, __LINE__)
 #else
-#  define log_assert(_assert_expr_)
+#  define log_assert(_assert_expr_) do { if (0) { (void)(_assert_expr_); } } while(0)
 #endif
 
-#define log_abort() YOSYS_NAMESPACE_PREFIX log_error("Abort in %s:%d.\n", __FILE__, __LINE__)
+[[noreturn]]
+void log_abort_internal(const char *file, int line);
+#define log_abort() YOSYS_NAMESPACE_PREFIX log_abort_internal(__FILE__, __LINE__)
 #define log_ping() YOSYS_NAMESPACE_PREFIX log("-- %s:%d %s --\n", __FILE__, __LINE__, __PRETTY_FUNCTION__)
 
 
@@ -182,19 +355,17 @@ struct PerformanceTimer
 	static int64_t query() {
 #  ifdef _WIN32
 		return 0;
-#  elif defined(_POSIX_TIMERS) && (_POSIX_TIMERS > 0)
-		struct timespec ts;
-		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
-		return int64_t(ts.tv_sec)*1000000000 + ts.tv_nsec;
 #  elif defined(RUSAGE_SELF)
 		struct rusage rusage;
-		int64_t t;
-		if (getrusage(RUSAGE_SELF, &rusage) == -1) {
-			log_cmd_error("getrusage failed!\n");
-			log_abort();
+		int64_t t = 0;
+		for (int who : {RUSAGE_SELF, RUSAGE_CHILDREN}) {
+			if (getrusage(who, &rusage) == -1) {
+				log_cmd_error("getrusage failed!\n");
+				log_abort();
+			}
+			t += 1000000000ULL * (int64_t) rusage.ru_utime.tv_sec + (int64_t) rusage.ru_utime.tv_usec * 1000ULL;
+			t += 1000000000ULL * (int64_t) rusage.ru_stime.tv_sec + (int64_t) rusage.ru_stime.tv_usec * 1000ULL;
 		}
-		t = 1000000000ULL * (int64_t) rusage.ru_utime.tv_sec + (int64_t) rusage.ru_utime.tv_usec * 1000ULL;
-		t += 1000000000ULL * (int64_t) rusage.ru_stime.tv_sec + (int64_t) rusage.ru_stime.tv_usec * 1000ULL;
 		return t;
 #  else
 #    error "Don't know how to measure per-process CPU time. Need alternative method (times()/clocks()/gettimeofday()?)."
@@ -237,24 +408,44 @@ static inline void log_dump_val_worker(unsigned long int v) { log("%lu", v); }
 static inline void log_dump_val_worker(long long int v) { log("%lld", v); }
 static inline void log_dump_val_worker(unsigned long long int v) { log("%lld", v); }
 #endif
-static inline void log_dump_val_worker(char c) { log(c >= 32 && c < 127 ? "'%c'" : "'\\x%02x'", c); }
-static inline void log_dump_val_worker(unsigned char c) { log(c >= 32 && c < 127 ? "'%c'" : "'\\x%02x'", c); }
+static inline void log_dump_val_worker(char c)
+{
+	if (c >= 32 && c < 127) {
+		log("'%c'", c);
+	} else {
+		log("'\\x%02x'", c);
+	}
+}
+static inline void log_dump_val_worker(unsigned char c)
+{
+	if (c >= 32 && c < 127) {
+		log("'%c'", c);
+	} else {
+		log("'\\x%02x'", c);
+	}
+}
 static inline void log_dump_val_worker(bool v) { log("%s", v ? "true" : "false"); }
 static inline void log_dump_val_worker(double v) { log("%f", v); }
 static inline void log_dump_val_worker(char *v) { log("%s", v); }
 static inline void log_dump_val_worker(const char *v) { log("%s", v); }
-static inline void log_dump_val_worker(std::string v) { log("%s", v.c_str()); }
+static inline void log_dump_val_worker(std::string v) { log("%s", v); }
 static inline void log_dump_val_worker(PerformanceTimer p) { log("%f seconds", p.sec()); }
-static inline void log_dump_args_worker(const char *p YS_ATTRIBUTE(unused)) { log_assert(*p == 0); }
+static inline void log_dump_args_worker(const char *p) { log_assert(*p == 0); }
 void log_dump_val_worker(RTLIL::IdString v);
 void log_dump_val_worker(RTLIL::SigSpec v);
+void log_dump_val_worker(RTLIL::State v);
 
-template<typename K, typename T, typename OPS>
-static inline void log_dump_val_worker(dict<K, T, OPS> &v) {
+template<typename K, typename T> static inline void log_dump_val_worker(dict<K, T> &v);
+template<typename K> static inline void log_dump_val_worker(pool<K> &v);
+template<typename K> static inline void log_dump_val_worker(std::vector<K> &v);
+template<typename T> static inline void log_dump_val_worker(T *ptr);
+
+template<typename K, typename T>
+static inline void log_dump_val_worker(dict<K, T> &v) {
 	log("{");
 	bool first = true;
 	for (auto &it : v) {
-		log(first ? " " : ", ");
+		log("%s ", first ? "" : ",");
 		log_dump_val_worker(it.first);
 		log(": ");
 		log_dump_val_worker(it.second);
@@ -263,12 +454,24 @@ static inline void log_dump_val_worker(dict<K, T, OPS> &v) {
 	log(" }");
 }
 
-template<typename K, typename OPS>
-static inline void log_dump_val_worker(pool<K, OPS> &v) {
+template<typename K>
+static inline void log_dump_val_worker(pool<K> &v) {
 	log("{");
 	bool first = true;
 	for (auto &it : v) {
-		log(first ? " " : ", ");
+		log("%s ", first ? "" : ",");
+		log_dump_val_worker(it);
+		first = false;
+	}
+	log(" }");
+}
+
+template<typename K>
+static inline void log_dump_val_worker(std::vector<K> &v) {
+	log("{");
+	bool first = true;
+	for (auto &it : v) {
+		log("%s ", first ? "" : ",");
 		log_dump_val_worker(it);
 		first = false;
 	}
@@ -319,5 +522,7 @@ void log_dump_args_worker(const char *p, T first, Args ... args)
 } while (0)
 
 YOSYS_NAMESPACE_END
+
+#include "kernel/yosys.h"
 
 #endif

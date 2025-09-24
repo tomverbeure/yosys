@@ -1,7 +1,7 @@
 /* -*- c++ -*-
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -48,8 +48,11 @@ struct ModIndex : public RTLIL::Monitor
 			return cell == other.cell && port == other.port && offset == other.offset;
 		}
 
-		unsigned int hash() const {
-			return mkhash_add(mkhash(cell->name.hash(), port.hash()), offset);
+		[[nodiscard]] Hasher hash_into(Hasher h) const {
+			h.eat(cell->name);
+			h.eat(port);
+			h.eat(offset);
+			return h;
 		}
 	};
 
@@ -158,7 +161,7 @@ struct ModIndex : public RTLIL::Monitor
 #endif
 	}
 
-	void notify_connect(RTLIL::Cell *cell, const RTLIL::IdString &port, const RTLIL::SigSpec &old_sig, RTLIL::SigSpec &sig) YS_OVERRIDE
+	void notify_connect(RTLIL::Cell *cell, const RTLIL::IdString &port, const RTLIL::SigSpec &old_sig, const RTLIL::SigSpec &sig) override
 	{
 		log_assert(module == cell->module);
 
@@ -169,7 +172,7 @@ struct ModIndex : public RTLIL::Monitor
 		port_add(cell, port, sig);
 	}
 
-	void notify_connect(RTLIL::Module *mod YS_ATTRIBUTE(unused), const RTLIL::SigSig &sigsig) YS_OVERRIDE
+	void notify_connect(RTLIL::Module *mod, const RTLIL::SigSig &sigsig) override
 	{
 		log_assert(module == mod);
 
@@ -214,13 +217,13 @@ struct ModIndex : public RTLIL::Monitor
 		}
 	}
 
-	void notify_connect(RTLIL::Module *mod YS_ATTRIBUTE(unused), const std::vector<RTLIL::SigSig>&) YS_OVERRIDE
+	void notify_connect(RTLIL::Module *mod, const std::vector<RTLIL::SigSig>&) override
 	{
 		log_assert(module == mod);
 		auto_reload_module = true;
 	}
 
-	void notify_blackout(RTLIL::Module *mod YS_ATTRIBUTE(unused)) YS_OVERRIDE
+	void notify_blackout(RTLIL::Module *mod) override
 	{
 		log_assert(module == mod);
 		auto_reload_module = true;
@@ -304,6 +307,7 @@ struct ModWalker
 		RTLIL::Cell *cell;
 		RTLIL::IdString port;
 		int offset;
+		PortBit(Cell* c, IdString p, int o) : cell(c), port(p), offset(o) {}
 
 		bool operator<(const PortBit &other) const {
 			if (cell != other.cell)
@@ -317,8 +321,11 @@ struct ModWalker
 			return cell == other.cell && port == other.port && offset == other.offset;
 		}
 
-		unsigned int hash() const {
-			return mkhash_add(mkhash(cell->name.hash(), port.hash()), offset);
+		[[nodiscard]] Hasher hash_into(Hasher h) const {
+			h.eat(cell->name);
+			h.eat(port);
+			h.eat(offset);
+			return h;
 		}
 	};
 
@@ -355,7 +362,7 @@ struct ModWalker
 	{
 		for (int i = 0; i < int(bits.size()); i++)
 			if (bits[i].wire != NULL) {
-				PortBit pbit = { cell, port, i };
+				PortBit pbit {cell, port, i};
 				if (is_output) {
 					signal_drivers[bits[i]].insert(pbit);
 					cell_outputs[cell].insert(bits[i]);
@@ -380,28 +387,25 @@ struct ModWalker
 		}
 	}
 
-	ModWalker() : design(NULL), module(NULL)
+	ModWalker(RTLIL::Design *design, RTLIL::Module *module = nullptr) : design(design), module(NULL)
 	{
+		ct.setup(design);
+		if (module)
+			setup(module);
 	}
 
-	ModWalker(RTLIL::Design *design, RTLIL::Module *module, CellTypes *filter_ct = NULL)
+	void setup(RTLIL::Module *module, CellTypes *filter_ct = NULL)
 	{
-		setup(design, module, filter_ct);
-	}
-
-	void setup(RTLIL::Design *design, RTLIL::Module *module, CellTypes *filter_ct = NULL)
-	{
-		this->design = design;
 		this->module = module;
 
-		ct.clear();
-		ct.setup(design);
 		sigmap.set(module);
 
 		signal_drivers.clear();
 		signal_consumers.clear();
 		signal_inputs.clear();
 		signal_outputs.clear();
+		cell_inputs.clear();
+		cell_outputs.clear();
 
 		for (auto &it : module->wires_)
 			add_wire(it.second);
@@ -412,7 +416,6 @@ struct ModWalker
 
 	// get_* methods -- single RTLIL::SigBit
 
-	template<typename T>
 	inline bool get_drivers(pool<PortBit> &result, RTLIL::SigBit bit) const
 	{
 		bool found = false;
@@ -424,7 +427,6 @@ struct ModWalker
 		return found;
 	}
 
-	template<typename T>
 	inline bool get_consumers(pool<PortBit> &result, RTLIL::SigBit bit) const
 	{
 		bool found = false;
@@ -436,7 +438,6 @@ struct ModWalker
 		return found;
 	}
 
-	template<typename T>
 	inline bool get_inputs(pool<RTLIL::SigBit> &result, RTLIL::SigBit bit) const
 	{
 		bool found = false;
@@ -445,7 +446,6 @@ struct ModWalker
 		return found;
 	}
 
-	template<typename T>
 	inline bool get_outputs(pool<RTLIL::SigBit> &result, RTLIL::SigBit bit) const
 	{
 		bool found = false;

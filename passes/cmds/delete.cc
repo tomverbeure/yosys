@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -24,7 +24,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 struct DeletePass : public Pass {
 	DeletePass() : Pass("delete", "delete objects in the design") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -40,7 +40,7 @@ struct DeletePass : public Pass {
 		log("selected wires, thus 'deleting' module ports.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		bool flag_input = false;
 		bool flag_output = false;
@@ -65,27 +65,24 @@ struct DeletePass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
-		std::vector<RTLIL::IdString> delete_mods;
-
-		for (auto &mod_it : design->modules_)
+		std::vector<RTLIL::Module *> delete_mods;
+		for (auto module : design->modules())
 		{
-			if (design->selected_whole_module(mod_it.first) && !flag_input && !flag_output) {
-				delete_mods.push_back(mod_it.first);
+			if (design->selected_whole_module(module->name) && !flag_input && !flag_output) {
+				delete_mods.push_back(module);
 				continue;
 			}
 
-			if (!design->selected_module(mod_it.first))
+			if (!design->selected_module(module->name))
 				continue;
 
-			RTLIL::Module *module = mod_it.second;
-
 			if (flag_input || flag_output) {
-				for (auto &it : module->wires_)
-					if (design->selected(module, it.second)) {
+				for (auto wire : module->wires())
+					if (design->selected(module, wire)) {
 						if (flag_input)
-							it.second->port_input = false;
+							wire->port_input = false;
 						if (flag_output)
-							it.second->port_output = false;
+							wire->port_output = false;
 					}
 				module->fixup_ports();
 				continue;
@@ -93,28 +90,27 @@ struct DeletePass : public Pass {
 
 			pool<RTLIL::Wire*> delete_wires;
 			pool<RTLIL::Cell*> delete_cells;
-			pool<RTLIL::IdString> delete_procs;
+			pool<RTLIL::Process*> delete_procs;
 			pool<RTLIL::IdString> delete_mems;
 
-			for (auto &it : module->wires_)
-				if (design->selected(module, it.second))
-					delete_wires.insert(it.second);
+			for (auto wire : module->selected_wires())
+				delete_wires.insert(wire);
 
 			for (auto &it : module->memories)
 				if (design->selected(module, it.second))
 					delete_mems.insert(it.first);
 
-			for (auto &it : module->cells_) {
-				if (design->selected(module, it.second))
-					delete_cells.insert(it.second);
-				if ((it.second->type == "$memrd" || it.second->type == "$memwr") &&
-						delete_mems.count(it.second->parameters.at("\\MEMID").decode_string()) != 0)
-					delete_cells.insert(it.second);
+			for (auto cell : module->cells()) {
+				if (design->selected(module, cell))
+					delete_cells.insert(cell);
+				if (cell->has_memid() &&
+						delete_mems.count(cell->parameters.at(ID::MEMID).decode_string()) != 0)
+					delete_cells.insert(cell);
 			}
 
 			for (auto &it : module->processes)
 				if (design->selected(module, it.second))
-					delete_procs.insert(it.first);
+					delete_procs.insert(it.second);
 
 			for (auto &it : delete_mems) {
 				delete module->memories.at(it);
@@ -124,19 +120,16 @@ struct DeletePass : public Pass {
 			for (auto &it : delete_cells)
 				module->remove(it);
 
-			for (auto &it : delete_procs) {
-				delete module->processes.at(it);
-				module->processes.erase(it);
-			}
+			for (auto &it : delete_procs)
+				module->remove(it);
 
 			module->remove(delete_wires);
 
 			module->fixup_ports();
 		}
 
-		for (auto &it : delete_mods) {
-			delete design->modules_.at(it);
-			design->modules_.erase(it);
+		for (auto mod : delete_mods) {
+			design->remove(mod);
 		}
 	}
 } DeletePass;

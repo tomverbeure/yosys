@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -26,32 +26,24 @@ YOSYS_NAMESPACE_BEGIN
 
 struct Macc
 {
-	struct port_t {
+	struct term_t {
 		RTLIL::SigSpec in_a, in_b;
 		bool is_signed, do_subtract;
 	};
-
-	std::vector<port_t> ports;
-	RTLIL::SigSpec bit_ports;
+	std::vector<term_t> terms;
 
 	void optimize(int width)
 	{
-		std::vector<port_t> new_ports;
-		RTLIL::SigSpec new_bit_ports;
+		std::vector<term_t> new_terms;
 		RTLIL::Const off(0, width);
 
-		for (auto &port : ports)
+		for (auto &port : terms)
 		{
 			if (GetSize(port.in_a) == 0 && GetSize(port.in_b) == 0)
 				continue;
 
 			if (GetSize(port.in_a) < GetSize(port.in_b))
 				std::swap(port.in_a, port.in_b);
-
-			if (GetSize(port.in_a) == 1 && GetSize(port.in_b) == 0 && !port.is_signed && !port.do_subtract) {
-				bit_ports.append(port.in_a);
-				continue;
-			}
 
 			if (port.in_a.is_fully_const() && port.in_b.is_fully_const()) {
 				RTLIL::Const v = port.in_a.as_const();
@@ -70,66 +62,56 @@ struct Macc
 				while (GetSize(port.in_b) > 1 && port.in_b[GetSize(port.in_b)-1] == port.in_b[GetSize(port.in_b)-2])
 					port.in_b.remove(GetSize(port.in_b)-1);
 			} else {
-				while (GetSize(port.in_a) > 1 && port.in_a[GetSize(port.in_a)-1] == RTLIL::S0)
+				while (GetSize(port.in_a) > 1 && port.in_a[GetSize(port.in_a)-1] == State::S0)
 					port.in_a.remove(GetSize(port.in_a)-1);
-				while (GetSize(port.in_b) > 1 && port.in_b[GetSize(port.in_b)-1] == RTLIL::S0)
+				while (GetSize(port.in_b) > 1 && port.in_b[GetSize(port.in_b)-1] == State::S0)
 					port.in_b.remove(GetSize(port.in_b)-1);
 			}
 
-			new_ports.push_back(port);
+			new_terms.push_back(port);
 		}
 
-		for (auto &bit : bit_ports)
-			if (bit == RTLIL::S1)
-				off = const_add(off, RTLIL::Const(1, width), false, false, width);
-			else if (bit != RTLIL::S0)
-				new_bit_ports.append(bit);
-
 		if (off.as_bool()) {
-			port_t port;
+			term_t port;
 			port.in_a = off;
 			port.is_signed = false;
 			port.do_subtract = false;
-			new_ports.push_back(port);
+			new_terms.push_back(port);
 		}
 
-		new_ports.swap(ports);
-		bit_ports = new_bit_ports;
+		new_terms.swap(terms);
 	}
 
-	void from_cell(RTLIL::Cell *cell)
+	void from_cell_v1(RTLIL::Cell *cell)
 	{
-		RTLIL::SigSpec port_a = cell->getPort("\\A");
+		RTLIL::SigSpec port_a = cell->getPort(ID::A);
 
-		ports.clear();
-		bit_ports = cell->getPort("\\B");
+		terms.clear();
 
-		std::vector<RTLIL::State> config_bits = cell->getParam("\\CONFIG").bits;
+		auto config_bits = cell->getParam(ID::CONFIG);
 		int config_cursor = 0;
 
-#ifndef NDEBUG
-		int config_width = cell->getParam("\\CONFIG_WIDTH").as_int();
+		int config_width = cell->getParam(ID::CONFIG_WIDTH).as_int();
 		log_assert(GetSize(config_bits) >= config_width);
-#endif
 
 		int num_bits = 0;
-		if (config_bits[config_cursor++] == RTLIL::S1) num_bits |= 1;
-		if (config_bits[config_cursor++] == RTLIL::S1) num_bits |= 2;
-		if (config_bits[config_cursor++] == RTLIL::S1) num_bits |= 4;
-		if (config_bits[config_cursor++] == RTLIL::S1) num_bits |= 8;
+		if (config_bits[config_cursor++] == State::S1) num_bits |= 1;
+		if (config_bits[config_cursor++] == State::S1) num_bits |= 2;
+		if (config_bits[config_cursor++] == State::S1) num_bits |= 4;
+		if (config_bits[config_cursor++] == State::S1) num_bits |= 8;
 
 		int port_a_cursor = 0;
 		while (port_a_cursor < GetSize(port_a))
 		{
 			log_assert(config_cursor + 2 + 2*num_bits <= config_width);
 
-			port_t this_port;
-			this_port.is_signed = config_bits[config_cursor++] == RTLIL::S1;
-			this_port.do_subtract = config_bits[config_cursor++] == RTLIL::S1;
+			term_t this_port;
+			this_port.is_signed = config_bits[config_cursor++] == State::S1;
+			this_port.do_subtract = config_bits[config_cursor++] == State::S1;
 
 			int size_a = 0;
 			for (int i = 0; i < num_bits; i++)
-				if (config_bits[config_cursor++] == RTLIL::S1)
+				if (config_bits[config_cursor++] == State::S1)
 					size_a |= 1 << i;
 
 			this_port.in_a = port_a.extract(port_a_cursor, size_a);
@@ -137,74 +119,153 @@ struct Macc
 
 			int size_b = 0;
 			for (int i = 0; i < num_bits; i++)
-				if (config_bits[config_cursor++] == RTLIL::S1)
+				if (config_bits[config_cursor++] == State::S1)
 					size_b |= 1 << i;
 
 			this_port.in_b = port_a.extract(port_a_cursor, size_b);
 			port_a_cursor += size_b;
 
 			if (size_a || size_b)
-				ports.push_back(this_port);
+				terms.push_back(this_port);
 		}
+
+		for (auto bit : cell->getPort(ID::B))
+			terms.push_back(term_t{{bit}, {}, false, false});
 
 		log_assert(config_cursor == config_width);
 		log_assert(port_a_cursor == GetSize(port_a));
 	}
 
-	void to_cell(RTLIL::Cell *cell) const
+	void from_cell(RTLIL::Cell *cell)
 	{
-		RTLIL::SigSpec port_a;
-		std::vector<RTLIL::State> config_bits;
-		int max_size = 0, num_bits = 0;
+		if (cell->type == ID($macc)) {
+			from_cell_v1(cell);
+			return;
+		}
+		log_assert(cell->type == ID($macc_v2));
 
-		for (auto &port : ports) {
-			max_size = max(max_size, GetSize(port.in_a));
-			max_size = max(max_size, GetSize(port.in_b));
+		RTLIL::SigSpec port_a = cell->getPort(ID::A);
+		RTLIL::SigSpec port_b = cell->getPort(ID::B);
+		RTLIL::SigSpec port_c = cell->getPort(ID::C);
+
+		terms.clear();
+
+		int nproducts = cell->getParam(ID::NPRODUCTS).as_int();
+		const Const &product_neg = cell->getParam(ID::PRODUCT_NEGATED);
+		const Const &a_widths = cell->getParam(ID::A_WIDTHS);
+		const Const &b_widths = cell->getParam(ID::B_WIDTHS);
+		const Const &a_signed = cell->getParam(ID::A_SIGNED);
+		const Const &b_signed = cell->getParam(ID::B_SIGNED);
+		int ai = 0, bi = 0;
+		for (int i = 0; i < nproducts; i++) {
+			term_t term;
+
+			log_assert(a_signed[i] == b_signed[i]);
+			term.is_signed = (a_signed[i] == State::S1);
+			int a_width = a_widths.extract(16 * i, 16).as_int(false);
+			int b_width = b_widths.extract(16 * i, 16).as_int(false);
+
+			term.in_a = port_a.extract(ai, a_width);
+			ai += a_width;
+			term.in_b = port_b.extract(bi, b_width);
+			bi += b_width;
+			term.do_subtract = (product_neg[i] == State::S1);
+
+			terms.push_back(term);
+		}
+		log_assert(port_a.size() == ai);
+		log_assert(port_b.size() == bi);
+
+		int naddends = cell->getParam(ID::NADDENDS).as_int();
+		const Const &addend_neg = cell->getParam(ID::ADDEND_NEGATED);
+		const Const &c_widths = cell->getParam(ID::C_WIDTHS);
+		const Const &c_signed = cell->getParam(ID::C_SIGNED);
+		int ci = 0;
+		for (int i = 0; i < naddends; i++) {
+			term_t term;
+
+			term.is_signed = (c_signed[i] == State::S1);
+			int c_width = c_widths.extract(16 * i, 16).as_int(false);
+
+			term.in_a = port_c.extract(ci, c_width);
+			ci += c_width;
+			term.do_subtract = (addend_neg[i] == State::S1);
+
+			terms.push_back(term);
+		}
+		log_assert(port_c.size() == ci);
+	}
+
+	void to_cell(RTLIL::Cell *cell)
+	{
+		cell->type = ID($macc_v2);
+
+		int nproducts = 0, naddends = 0;
+		Const a_signed, b_signed, a_widths, b_widths, product_negated;
+		Const c_signed, c_widths, addend_negated;
+		SigSpec a, b, c;
+
+		for (int i = 0; i < (int) terms.size(); i++) {
+			SigSpec term_a = terms[i].in_a, term_b = terms[i].in_b;
+
+			if (term_b.empty()) {
+				// addend
+				c_widths.append(Const(term_a.size(), 16));
+				c_signed.append(terms[i].is_signed ? RTLIL::S1 : RTLIL::S0);
+				addend_negated.append(terms[i].do_subtract ? RTLIL::S1 : RTLIL::S0);
+				c.append(term_a);
+				naddends++;
+			} else {
+				// product
+				a_widths.append(Const(term_a.size(), 16));
+				b_widths.append(Const(term_b.size(), 16));
+				a_signed.append(terms[i].is_signed ? RTLIL::S1 : RTLIL::S0);
+				b_signed.append(terms[i].is_signed ? RTLIL::S1 : RTLIL::S0);
+				product_negated.append(terms[i].do_subtract ? RTLIL::S1 : RTLIL::S0);
+				a.append(term_a);
+				b.append(term_b);
+				nproducts++;
+			}
 		}
 
-		while (max_size)
-			num_bits++, max_size /= 2;
+		if (a_signed.empty())
+			a_signed = {RTLIL::Sx};
+		if (b_signed.empty())
+			b_signed = {RTLIL::Sx};
+		if (c_signed.empty())
+			c_signed = {RTLIL::Sx};
+		if (a_widths.empty())
+			a_widths = {RTLIL::Sx};
+		if (b_widths.empty())
+			b_widths = {RTLIL::Sx};
+		if (c_widths.empty())
+			c_widths = {RTLIL::Sx};
+		if (product_negated.empty())
+			product_negated = {RTLIL::Sx};
+		if (addend_negated.empty())
+			addend_negated = {RTLIL::Sx};
 
-		log_assert(num_bits < 16);
-		config_bits.push_back(num_bits & 1 ? RTLIL::S1 : RTLIL::S0);
-		config_bits.push_back(num_bits & 2 ? RTLIL::S1 : RTLIL::S0);
-		config_bits.push_back(num_bits & 4 ? RTLIL::S1 : RTLIL::S0);
-		config_bits.push_back(num_bits & 8 ? RTLIL::S1 : RTLIL::S0);
-
-		for (auto &port : ports)
-		{
-			if (GetSize(port.in_a) == 0)
-				continue;
-
-			config_bits.push_back(port.is_signed ? RTLIL::S1 : RTLIL::S0);
-			config_bits.push_back(port.do_subtract ? RTLIL::S1 : RTLIL::S0);
-
-			int size_a = GetSize(port.in_a);
-			for (int i = 0; i < num_bits; i++)
-				config_bits.push_back(size_a & (1 << i) ? RTLIL::S1 : RTLIL::S0);
-
-			int size_b = GetSize(port.in_b);
-			for (int i = 0; i < num_bits; i++)
-				config_bits.push_back(size_b & (1 << i) ? RTLIL::S1 : RTLIL::S0);
-
-			port_a.append(port.in_a);
-			port_a.append(port.in_b);
-		}
-
-		cell->setPort("\\A", port_a);
-		cell->setPort("\\B", bit_ports);
-		cell->setParam("\\CONFIG", config_bits);
-		cell->setParam("\\CONFIG_WIDTH", GetSize(config_bits));
-		cell->setParam("\\A_WIDTH", GetSize(port_a));
-		cell->setParam("\\B_WIDTH", GetSize(bit_ports));
+		cell->setParam(ID::NPRODUCTS, nproducts);
+		cell->setParam(ID::PRODUCT_NEGATED, product_negated);
+		cell->setParam(ID::NADDENDS, naddends);
+		cell->setParam(ID::ADDEND_NEGATED, addend_negated);
+		cell->setParam(ID::A_SIGNED, a_signed);
+		cell->setParam(ID::B_SIGNED, b_signed);
+		cell->setParam(ID::C_SIGNED, c_signed);
+		cell->setParam(ID::A_WIDTHS, a_widths);
+		cell->setParam(ID::B_WIDTHS, b_widths);
+		cell->setParam(ID::C_WIDTHS, c_widths);
+		cell->setPort(ID::A, a);
+		cell->setPort(ID::B, b);
+		cell->setPort(ID::C, c);
 	}
 
 	bool eval(RTLIL::Const &result) const
 	{
-		for (auto &bit : result.bits)
-			bit = RTLIL::S0;
+		for (auto bit : result)
+			bit = State::S0;
 
-		for (auto &port : ports)
+		for (auto &port : terms)
 		{
 			if (!port.in_a.is_fully_const() || !port.in_b.is_fully_const())
 				return false;
@@ -221,13 +282,14 @@ struct Macc
 				result = const_add(result, summand, port.is_signed, port.is_signed, GetSize(result));
 		}
 
-		for (auto bit : bit_ports) {
-			if (bit.wire)
-				return false;
-			result = const_add(result, bit.data, false, false, GetSize(result));
-		}
-
 		return true;
+	}
+
+	bool is_simple_product()
+	{
+		return terms.size() == 1 &&
+				!terms[0].in_b.empty() &&
+				!terms[0].do_subtract;
 	}
 
 	Macc(RTLIL::Cell *cell = nullptr)

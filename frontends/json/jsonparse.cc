@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -25,7 +25,7 @@ struct JsonNode
 {
 	char type; // S=String, N=Number, A=Array, D=Dict
 	string data_string;
-	int data_number;
+	int64_t data_number;
 	vector<JsonNode*> data_array;
 	dict<string, JsonNode*> data_dict;
 	vector<string> data_dict_keys;
@@ -60,10 +60,38 @@ struct JsonNode
 						break;
 
 					if (ch == '\\') {
-						int ch = f.get();
+						ch = f.get();
 
-						if (ch == EOF)
-							log_error("Unexpected EOF in JSON string.\n");
+						switch (ch) {
+							case EOF: log_error("Unexpected EOF in JSON string.\n"); break;
+							case '"':
+							case '/':
+							case '\\':           break;
+							case 'b': ch = '\b'; break;
+							case 'f': ch = '\f'; break;
+							case 'n': ch = '\n'; break;
+							case 'r': ch = '\r'; break;
+							case 't': ch = '\t'; break;
+							case 'u':
+								int val = 0;
+								for (int i = 0; i < 4; i++) {
+									ch = f.get();
+									val <<= 4;
+									if (ch >= '0' && '9' >= ch) {
+										val += ch - '0';
+									} else if (ch >= 'A' && 'F' >= ch) {
+										val += 10 + ch - 'A';
+									} else if (ch >= 'a' && 'f' >= ch) {
+										val += 10 + ch - 'a';
+									} else
+										log_error("Unexpected non-digit character in \\uXXXX sequence: %c.\n", ch);
+								}
+								if (val < 128)
+									ch = val;
+								else
+									log_error("Unsupported \\uXXXX sequence in JSON string: %04X.\n", val);
+								break;
+						}
 					}
 
 					data_string += ch;
@@ -72,10 +100,17 @@ struct JsonNode
 				break;
 			}
 
-			if ('0' <= ch && ch <= '9')
+			if (('0' <= ch && ch <= '9') || ch == '-')
 			{
+				bool negative = false;
 				type = 'N';
-				data_number = ch - '0';
+				if (ch == '-') {
+					data_number = 0;
+				       	negative = true;
+				} else {
+					data_number = ch - '0';
+				}
+
 				data_string += ch;
 
 				while (1)
@@ -97,6 +132,7 @@ struct JsonNode
 					data_string += ch;
 				}
 
+				data_number = negative ? -data_number : data_number;
 				data_string = "";
 				break;
 
@@ -206,6 +242,38 @@ struct JsonNode
 	}
 };
 
+Const json_parse_attr_param_value(JsonNode *node)
+{
+	Const value;
+
+	if (node->type == 'S') {
+		string &s = node->data_string;
+		size_t cursor = s.find_first_not_of("01xz");
+		if (cursor == string::npos) {
+			value = Const::from_string(s);
+		} else if (s.find_first_not_of(' ', cursor) == string::npos) {
+			value = Const(s.substr(0, GetSize(s)-1));
+		} else {
+			value = Const(s);
+		}
+	} else
+	if (node->type == 'N') {
+		value = Const(node->data_number);
+		if (node->data_number < 0)
+			value.flags |= RTLIL::CONST_FLAG_SIGNED;
+	} else
+	if (node->type == 'A') {
+		log_error("JSON attribute or parameter value is an array.\n");
+	} else
+	if (node->type == 'D') {
+		log_error("JSON attribute or parameter value is a dict.\n");
+	} else {
+		log_abort();
+	}
+
+	return value;
+}
+
 void json_parse_attr_param(dict<IdString, Const> &results, JsonNode *node)
 {
 	if (node->type != 'D')
@@ -214,35 +282,14 @@ void json_parse_attr_param(dict<IdString, Const> &results, JsonNode *node)
 	for (auto it : node->data_dict)
 	{
 		IdString key = RTLIL::escape_id(it.first.c_str());
-		JsonNode *value_node = it.second;
-		Const value;
-
-		if (value_node->type == 'S') {
-			string &s = value_node->data_string;
-			if (s.find_first_not_of("01xz") == string::npos)
-				value = Const::from_string(s);
-			else
-				value = Const(s);
-		} else
-		if (value_node->type == 'N') {
-			value = Const(value_node->data_number, 32);
-		} else
-		if (value_node->type == 'A') {
-			log_error("JSON attribute or parameter value is an array.\n");
-		} else
-		if (value_node->type == 'D') {
-			log_error("JSON attribute or parameter value is a dict.\n");
-		} else {
-			log_abort();
-		}
-
+		Const value = json_parse_attr_param_value(it.second);
 		results[key] = value;
 	}
 }
 
 void json_import(Design *design, string &modname, JsonNode *node)
 {
-	log("Importing module %s from JSON tree.\n", modname.c_str());
+	log("Importing module %s from JSON tree.\n", modname);
 
 	Module *module = new RTLIL::Module;
 	module->name = RTLIL::escape_id(modname.c_str());
@@ -292,6 +339,24 @@ void json_import(Design *design, string &modname, JsonNode *node)
 			if (port_wire == nullptr)
 				port_wire = module->addWire(port_name, GetSize(port_bits_node->data_array));
 
+			if (port_node->data_dict.count("upto") != 0) {
+				JsonNode *val = port_node->data_dict.at("upto");
+				if (val->type == 'N')
+					port_wire->upto = val->data_number != 0;
+			}
+
+			if (port_node->data_dict.count("signed") != 0) {
+				JsonNode *val = port_node->data_dict.at("signed");
+				if (val->type == 'N')
+					port_wire->is_signed = val->data_number != 0;
+			}
+
+			if (port_node->data_dict.count("offset") != 0) {
+				JsonNode *val = port_node->data_dict.at("offset");
+				if (val->type == 'N')
+					port_wire->start_offset = val->data_number;
+			}
+
 			if (port_direction_node->data_string == "input") {
 				port_wire->port_input = true;
 			} else
@@ -302,7 +367,7 @@ void json_import(Design *design, string &modname, JsonNode *node)
 				port_wire->port_input = true;
 				port_wire->port_output = true;
 			} else
-				log_error("JSON port node '%s' has invalid '%s' direction attribute.\n", log_id(port_name), port_direction_node->data_string.c_str());
+				log_error("JSON port node '%s' has invalid '%s' direction attribute.\n", log_id(port_name), port_direction_node->data_string);
 
 			port_wire->port_id = port_id;
 
@@ -371,6 +436,18 @@ void json_import(Design *design, string &modname, JsonNode *node)
 
 			if (wire == nullptr)
 				wire = module->addWire(net_name, GetSize(bits_node->data_array));
+
+			if (net_node->data_dict.count("upto") != 0) {
+				JsonNode *val = net_node->data_dict.at("upto");
+				if (val->type == 'N')
+					wire->upto = val->data_number != 0;
+			}
+
+			if (net_node->data_dict.count("offset") != 0) {
+				JsonNode *val = net_node->data_dict.at("offset");
+				if (val->type == 'N')
+					wire->start_offset = val->data_number;
+			}
 
 			for (int i = 0; i < GetSize(bits_node->data_array); i++)
 			{
@@ -490,11 +567,61 @@ void json_import(Design *design, string &modname, JsonNode *node)
 				json_parse_attr_param(cell->parameters, cell_node->data_dict.at("parameters"));
 		}
 	}
+
+	if (node->data_dict.count("memories"))
+	{
+		JsonNode *memories_node = node->data_dict.at("memories");
+
+		if (memories_node->type != 'D')
+			log_error("JSON memories node is not a dictionary.\n");
+
+		for (auto &memory_node_it : memories_node->data_dict)
+		{
+			IdString memory_name = RTLIL::escape_id(memory_node_it.first.c_str());
+			JsonNode *memory_node = memory_node_it.second;
+
+			RTLIL::Memory *mem = new RTLIL::Memory;
+			mem->name = memory_name;
+
+			if (memory_node->type != 'D')
+				log_error("JSON memory node '%s' is not a dictionary.\n", log_id(memory_name));
+
+			if (memory_node->data_dict.count("width") == 0)
+				log_error("JSON memory node '%s' has no width attribute.\n", log_id(memory_name));
+			JsonNode *width_node = memory_node->data_dict.at("width");
+			if (width_node->type != 'N')
+				log_error("JSON memory node '%s' has a non-number width.\n", log_id(memory_name));
+			mem->width = width_node->data_number;
+
+			if (memory_node->data_dict.count("size") == 0)
+				log_error("JSON memory node '%s' has no size attribute.\n", log_id(memory_name));
+			JsonNode *size_node = memory_node->data_dict.at("size");
+			if (size_node->type != 'N')
+				log_error("JSON memory node '%s' has a non-number size.\n", log_id(memory_name));
+			mem->size = size_node->data_number;
+
+			mem->start_offset = 0;
+			if (memory_node->data_dict.count("start_offset") != 0) {
+				JsonNode *val = memory_node->data_dict.at("start_offset");
+				if (val->type == 'N')
+					mem->start_offset = val->data_number;
+			}
+
+			if (memory_node->data_dict.count("attributes"))
+				json_parse_attr_param(mem->attributes, memory_node->data_dict.at("attributes"));
+
+			module->memories[mem->name] = mem;
+		}
+	}
+
+	// remove duplicates from connections array
+	pool<RTLIL::SigSig> unique_connections(module->connections_.begin(), module->connections_.end());
+	module->connections_ = std::vector<RTLIL::SigSig>(unique_connections.begin(), unique_connections.end());
 }
 
 struct JsonFrontend : public Frontend {
 	JsonFrontend() : Frontend("json", "read JSON file") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -504,7 +631,7 @@ struct JsonFrontend : public Frontend {
 		log("for a description of the file format.\n");
 		log("\n");
 	}
-	void execute(std::istream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::istream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing JSON frontend.\n");
 
@@ -538,4 +665,3 @@ struct JsonFrontend : public Frontend {
 } JsonFrontend;
 
 YOSYS_NAMESPACE_END
-

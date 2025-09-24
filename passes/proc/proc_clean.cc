@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -31,7 +31,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 void proc_clean_switch(RTLIL::SwitchRule *sw, RTLIL::CaseRule *parent, bool &did_something, int &count, int max_depth)
 {
-	if (sw->signal.size() > 0 && sw->signal.is_fully_const())
+	if (sw->signal.size() > 0 && sw->signal.is_fully_def())
 	{
 		int found_matching_case_idx = -1;
 		for (int i = 0; i < int(sw->cases.size()) && found_matching_case_idx < 0; i++)
@@ -41,7 +41,7 @@ void proc_clean_switch(RTLIL::SwitchRule *sw, RTLIL::CaseRule *parent, bool &did
 				break;
 			for (int j = 0; j < int(cs->compare.size()); j++) {
 				RTLIL::SigSpec &val = cs->compare[j];
-				if (!val.is_fully_const())
+				if (!val.is_fully_def())
 					continue;
 				if (val == sw->signal) {
 					cs->compare.clear();
@@ -69,30 +69,40 @@ void proc_clean_switch(RTLIL::SwitchRule *sw, RTLIL::CaseRule *parent, bool &did
 		did_something = true;
 		for (auto &action : sw->cases[0]->actions)
 			parent->actions.push_back(action);
-		for (auto sw2 : sw->cases[0]->switches)
-			parent->switches.push_back(sw2);
+		parent->switches.insert(parent->switches.begin(), sw->cases[0]->switches.begin(), sw->cases[0]->switches.end());
 		sw->cases[0]->switches.clear();
 		delete sw->cases[0];
 		sw->cases.clear();
 	}
 	else
 	{
-		bool all_fully_def = true;
 		for (auto cs : sw->cases)
-		{
 			if (max_depth != 0)
 				proc_clean_case(cs, did_something, count, max_depth-1);
-			int size = 0;
-			for (auto cmp : cs->compare)
+
+		bool is_parallel_case = sw->get_bool_attribute(ID::parallel_case);
+		bool is_full_case = sw->get_bool_attribute(ID::full_case);
+
+		// Empty case removal.  The rules are:
+		//
+		// - for full_case: only remove cases if *all* cases are empty
+		// - for parallel_case but not full_case: remove any empty case
+		// - for non-parallel and non-full case: remove the final case if it's empty
+
+		if (is_full_case)
+		{
+			bool all_empty = true;
+			for (auto cs : sw->cases)
+				if (!cs->empty())
+					all_empty = false;
+			if (all_empty)
 			{
-				size += cmp.size();
-				if (!cmp.is_fully_def())
-					all_fully_def = false;
+				for (auto cs : sw->cases)
+					delete cs;
+				sw->cases.clear();
 			}
-			if (sw->signal.size() != size)
-				all_fully_def = false;
 		}
-		if (all_fully_def)
+		else if (is_parallel_case)
 		{
 			for (auto cs = sw->cases.begin(); cs != sw->cases.end();)
 			{
@@ -143,7 +153,7 @@ void proc_clean_case(RTLIL::CaseRule *cs, bool &did_something, int &count, int m
 YOSYS_NAMESPACE_END
 PRIVATE_NAMESPACE_BEGIN
 
-void proc_clean(RTLIL::Module *mod, RTLIL::Process *proc, int &total_count)
+void proc_clean(RTLIL::Module *mod, RTLIL::Process *proc, int &total_count, bool quiet)
 {
 	int count = 0;
 	bool did_something = true;
@@ -151,7 +161,7 @@ void proc_clean(RTLIL::Module *mod, RTLIL::Process *proc, int &total_count)
 		for (size_t j = 0; j < proc->syncs[i]->actions.size(); j++)
 			if (proc->syncs[i]->actions[j].first.size() == 0)
 				proc->syncs[i]->actions.erase(proc->syncs[i]->actions.begin() + (j--));
-		if (proc->syncs[i]->actions.size() == 0) {
+		if (proc->syncs[i]->actions.size() == 0 && proc->syncs[i]->mem_write_actions.size() == 0) {
 			delete proc->syncs[i];
 			proc->syncs.erase(proc->syncs.begin() + (i--));
 		}
@@ -160,51 +170,62 @@ void proc_clean(RTLIL::Module *mod, RTLIL::Process *proc, int &total_count)
 		did_something = false;
 		proc_clean_case(&proc->root_case, did_something, count, -1);
 	}
-	if (count > 0)
-		log("Found and cleaned up %d empty switch%s in `%s.%s'.\n", count, count == 1 ? "" : "es", mod->name.c_str(), proc->name.c_str());
+	if (count > 0 && !quiet)
+		log("Found and cleaned up %d empty switch%s in `%s.%s'.\n", count, count == 1 ? "" : "es", mod->name, proc->name);
 	total_count += count;
 }
 
 struct ProcCleanPass : public Pass {
 	ProcCleanPass() : Pass("proc_clean", "remove empty parts of processes") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    proc_clean [selection]\n");
+		log("    proc_clean [options] [selection]\n");
+		log("\n");
+		log("    -quiet\n");
+		log("        do not print any messages.\n");
 		log("\n");
 		log("This pass removes empty parts of processes and ultimately removes a process\n");
 		log("if it contains only empty structures.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		int total_count = 0;
-		log_header(design, "Executing PROC_CLEAN pass (remove empty switches from decision trees).\n");
+		bool quiet = false;
 
-		extra_args(args, 1, design);
+		if (find(args.begin(), args.end(), "-quiet") == args.end())
+			log_header(design, "Executing PROC_CLEAN pass (remove empty switches from decision trees).\n");
 
-		for (auto mod : design->modules()) {
-			std::vector<RTLIL::IdString> delme;
-			if (!design->selected(mod))
+		size_t argidx;
+		for (argidx = 1; argidx < args.size(); argidx++)
+		{
+			if (args[argidx] == "-quiet") {
+				quiet = true;
 				continue;
-			for (auto &proc_it : mod->processes) {
-				if (!design->selected(mod, proc_it.second))
-					continue;
-				proc_clean(mod, proc_it.second, total_count);
-				if (proc_it.second->syncs.size() == 0 && proc_it.second->root_case.switches.size() == 0 &&
-						proc_it.second->root_case.actions.size() == 0) {
-					log("Removing empty process `%s.%s'.\n", log_id(mod), proc_it.second->name.c_str());
-					delme.push_back(proc_it.first);
+			}
+		}
+		extra_args(args, argidx, design);
+
+		for (auto mod : design->all_selected_modules()) {
+			std::vector<RTLIL::Process *> delme;
+			for (auto proc : mod->selected_processes()) {
+				proc_clean(mod, proc, total_count, quiet);
+				if (proc->syncs.size() == 0 && proc->root_case.switches.size() == 0 &&
+						proc->root_case.actions.size() == 0) {
+					if (!quiet)
+						log("Removing empty process `%s.%s'.\n", log_id(mod), proc->name);
+					delme.push_back(proc);
 				}
 			}
-			for (auto &id : delme) {
-				delete mod->processes[id];
-				mod->processes.erase(id);
+			for (auto proc : delme) {
+				mod->remove(proc);
 			}
 		}
 
-		log("Cleaned up %d empty switch%s.\n", total_count, total_count == 1 ? "" : "es");
+		if (!quiet)
+			log("Cleaned up %d empty switch%s.\n", total_count, total_count == 1 ? "" : "es");
 	}
 } ProcCleanPass;
 

@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -25,7 +25,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 struct EquivAddPass : public Pass {
 	EquivAddPass() : Pass("equiv_add", "add a $equiv cell") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -39,7 +39,7 @@ struct EquivAddPass : public Pass {
 		log("This command adds $equiv cells for the ports of the specified cells.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, Design *design) override
 	{
 		bool try_mode = false;
 
@@ -61,18 +61,18 @@ struct EquivAddPass : public Pass {
 
 			if (gold_cell == nullptr) {
 				if (try_mode) {
-					log_warning("Can't find gold cell '%s'.\n", args[2].c_str());
+					log_warning("Can't find gold cell '%s'.\n", args[2]);
 					return;
 				}
-				log_cmd_error("Can't find gold cell '%s'.\n", args[2].c_str());
+				log_cmd_error("Can't find gold cell '%s'.\n", args[2]);
 			}
 
 			if (gate_cell == nullptr) {
 				if (try_mode) {
-					log_warning("Can't find gate cell '%s'.\n", args[3].c_str());
+					log_warning("Can't find gate cell '%s'.\n", args[3]);
 					return;
 				}
-				log_cmd_error("Can't find gate cell '%s'.\n", args[3].c_str());
+				log_cmd_error("Can't find gate cell '%s'.\n", args[3]);
 			}
 
 			for (auto conn : gold_cell->connections())
@@ -126,18 +126,18 @@ struct EquivAddPass : public Pass {
 
 			if (!SigSpec::parse(gate_signal, module, args[2])) {
 				if (try_mode) {
-					log_warning("Error in gate signal: %s\n", args[2].c_str());
+					log_warning("Error in gate signal: %s\n", args[2]);
 					return;
 				}
-				log_cmd_error("Error in gate signal: %s\n", args[2].c_str());
+				log_cmd_error("Error in gate signal: %s\n", args[2]);
 			}
 
 			if (!SigSpec::parse_rhs(gate_signal, gold_signal, module, args[1])) {
 				if (try_mode) {
-					log_warning("Error in gold signal: %s\n", args[1].c_str());
+					log_warning("Error in gold signal: %s\n", args[1]);
 					return;
 				}
-				log_cmd_error("Error in gold signal: %s\n", args[1].c_str());
+				log_cmd_error("Error in gold signal: %s\n", args[1]);
 			}
 
 			log_assert(GetSize(gold_signal) == GetSize(gate_signal));
@@ -152,7 +152,7 @@ struct EquivAddPass : public Pass {
 
 			for (int i = 0; i < GetSize(gold_signal); i++) {
 				Cell *equiv_cell = module->addEquiv(NEW_ID, gold_signal[i], gate_signal[i], equiv_signal[i]);
-				equiv_cell->set_bool_attribute("\\keep");
+				equiv_cell->set_bool_attribute(ID::keep);
 				to_equiv_bits[gold_signal[i]] = equiv_signal[i];
 				to_equiv_bits[gate_signal[i]] = equiv_signal[i];
 				added_equiv_cells.insert(equiv_cell);

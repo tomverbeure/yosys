@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -20,8 +20,7 @@
 #include "kernel/yosys.h"
 #include "kernel/celltypes.h"
 #include "kernel/sigtools.h"
-#include <string.h>
-#include <errno.h>
+#include "kernel/log_help.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -30,26 +29,31 @@ using RTLIL::id2cstr;
 
 static std::vector<RTLIL::Selection> work_stack;
 
-static bool match_ids(RTLIL::IdString id, std::string pattern)
+static bool match_ids(RTLIL::IdString id, const std::string &pattern)
 {
 	if (id == pattern)
 		return true;
-	if (id.size() > 0 && id[0] == '\\' && id.substr(1) == pattern)
+
+	const char *id_c = id.c_str();
+	const char *pat_c = pattern.c_str();
+	size_t id_size = strlen(id_c);
+	size_t pat_size = pattern.size();
+
+	if (*id_c == '\\' && id_size == 1 + pat_size && memcmp(id_c + 1, pat_c, pat_size) == 0)
 		return true;
-	if (patmatch(pattern.c_str(), id.c_str()))
+	if (patmatch(pat_c, id_c))
 		return true;
-	if (id.size() > 0 && id[0] == '\\' && patmatch(pattern.c_str(), id.substr(1).c_str()))
+	if (*id_c == '\\' && patmatch(pat_c, id_c + 1))
 		return true;
-	if (id.size() > 0 && id[0] == '$' && pattern.size() > 0 && pattern[0] == '$') {
-		const char *p = id.c_str();
-		const char *q = strrchr(p, '$');
+	if (*id_c == '$' && *pat_c == '$') {
+		const char *q = strrchr(id_c, '$');
 		if (pattern == q)
 			return true;
 	}
 	return false;
 }
 
-static bool match_attr_val(const RTLIL::Const &value, std::string pattern, char match_op)
+static bool match_attr_val(const RTLIL::Const &value, const std::string &pattern, char match_op)
 {
 	if (match_op == 0)
 		return true;
@@ -58,7 +62,7 @@ static bool match_attr_val(const RTLIL::Const &value, std::string pattern, char 
 	{
 		RTLIL::SigSpec sig_value;
 
-		if (!RTLIL::SigSpec::parse(sig_value, NULL, pattern))
+		if (!RTLIL::SigSpec::parse(sig_value, nullptr, pattern))
 			return false;
 
 		RTLIL::Const pattern_value = sig_value.as_const();
@@ -101,7 +105,7 @@ static bool match_attr_val(const RTLIL::Const &value, std::string pattern, char 
 	log_abort();
 }
 
-static bool match_attr(const dict<RTLIL::IdString, RTLIL::Const> &attributes, std::string name_pat, std::string value_pat, char match_op)
+static bool match_attr(const dict<RTLIL::IdString, RTLIL::Const> &attributes, const std::string &name_pat, const std::string &value_pat, char match_op)
 {
 	if (name_pat.find('*') != std::string::npos || name_pat.find('?') != std::string::npos || name_pat.find('[') != std::string::npos) {
 		for (auto &it : attributes) {
@@ -119,16 +123,16 @@ static bool match_attr(const dict<RTLIL::IdString, RTLIL::Const> &attributes, st
 	return false;
 }
 
-static bool match_attr(const dict<RTLIL::IdString, RTLIL::Const> &attributes, std::string match_expr)
+static bool match_attr(const dict<RTLIL::IdString, RTLIL::Const> &attributes, const std::string &match_expr)
 {
 	size_t pos = match_expr.find_first_of("<!=>");
 
 	if (pos != std::string::npos) {
-		if (match_expr.substr(pos, 2) == "!=")
+		if (match_expr.compare(pos, 2, "!=") == 0)
 			return match_attr(attributes, match_expr.substr(0, pos), match_expr.substr(pos+2), '!');
-		if (match_expr.substr(pos, 2) == "<=")
+		if (match_expr.compare(pos, 2, "<=") == 0)
 			return match_attr(attributes, match_expr.substr(0, pos), match_expr.substr(pos+2), '[');
-		if (match_expr.substr(pos, 2) == ">=")
+		if (match_expr.compare(pos, 2, ">=") == 0)
 			return match_attr(attributes, match_expr.substr(0, pos), match_expr.substr(pos+2), ']');
 		return match_attr(attributes, match_expr.substr(0, pos), match_expr.substr(pos+1), match_expr[pos]);
 	}
@@ -136,43 +140,60 @@ static bool match_attr(const dict<RTLIL::IdString, RTLIL::Const> &attributes, st
 	return match_attr(attributes, match_expr, std::string(), 0);
 }
 
+static void select_all(RTLIL::Design *design, RTLIL::Selection &lhs)
+{
+	if (!lhs.selects_all())
+		return;
+	lhs.current_design = design;
+	lhs.selected_modules.clear();
+	for (auto mod : design->modules()) {
+		if (!lhs.selects_boxes && mod->get_blackbox_attribute())
+			continue;
+		lhs.selected_modules.insert(mod->name);
+	}
+	lhs.full_selection = false;
+	lhs.complete_selection = false;
+}
+
 static void select_op_neg(RTLIL::Design *design, RTLIL::Selection &lhs)
 {
-	if (lhs.full_selection) {
-		lhs.full_selection = false;
-		lhs.selected_modules.clear();
-		lhs.selected_members.clear();
+	if (lhs.selects_all()) {
+		lhs.clear();
 		return;
 	}
 
 	if (lhs.selected_modules.size() == 0 && lhs.selected_members.size() == 0) {
-		lhs.full_selection = true;
+		if (lhs.selects_boxes)
+			lhs.complete_selection = true;
+		else
+			lhs.full_selection = true;
 		return;
 	}
 
-	RTLIL::Selection new_sel(false);
+	auto new_sel = RTLIL::Selection::EmptySelection();
 
-	for (auto &mod_it : design->modules_)
+	for (auto mod : design->modules())
 	{
-		if (lhs.selected_whole_module(mod_it.first))
+		if (!lhs.selects_boxes && mod->get_blackbox_attribute())
 			continue;
-		if (!lhs.selected_module(mod_it.first)) {
-			new_sel.selected_modules.insert(mod_it.first);
+		if (lhs.selected_whole_module(mod->name))
+			continue;
+		if (!lhs.selected_module(mod->name)) {
+			new_sel.selected_modules.insert(mod->name);
 			continue;
 		}
 
-		RTLIL::Module *mod = mod_it.second;
-		for (auto &it : mod->wires_)
-			if (!lhs.selected_member(mod_it.first, it.first))
-				new_sel.selected_members[mod->name].insert(it.first);
+		for (auto wire : mod->wires())
+			if (!lhs.selected_member(mod->name, wire->name))
+				new_sel.selected_members[mod->name].insert(wire->name);
 		for (auto &it : mod->memories)
-			if (!lhs.selected_member(mod_it.first, it.first))
+			if (!lhs.selected_member(mod->name, it.first))
 				new_sel.selected_members[mod->name].insert(it.first);
-		for (auto &it : mod->cells_)
-			if (!lhs.selected_member(mod_it.first, it.first))
-				new_sel.selected_members[mod->name].insert(it.first);
+		for (auto cell : mod->cells())
+			if (!lhs.selected_member(mod->name, cell->name))
+				new_sel.selected_members[mod->name].insert(cell->name);
 		for (auto &it : mod->processes)
-			if (!lhs.selected_member(mod_it.first, it.first))
+			if (!lhs.selected_member(mod->name, it.first))
 				new_sel.selected_members[mod->name].insert(it.first);
 	}
 
@@ -208,7 +229,7 @@ static void select_op_random(RTLIL::Design *design, RTLIL::Selection &lhs, int c
 		}
 	}
 
-	lhs = RTLIL::Selection(false);
+	lhs = RTLIL::Selection(false, lhs.selects_boxes, design);
 
 	while (!objects.empty() && count-- > 0)
 	{
@@ -223,15 +244,15 @@ static void select_op_random(RTLIL::Design *design, RTLIL::Selection &lhs, int c
 
 static void select_op_submod(RTLIL::Design *design, RTLIL::Selection &lhs)
 {
-	for (auto &mod_it : design->modules_)
+	for (auto mod : design->modules())
 	{
-		if (lhs.selected_whole_module(mod_it.first))
+		if (lhs.selected_whole_module(mod->name))
 		{
-			for (auto &cell_it : mod_it.second->cells_)
+			for (auto cell : mod->cells())
 			{
-				if (design->modules_.count(cell_it.second->type) == 0)
+				if (design->module(cell->type) == nullptr)
 					continue;
-				lhs.selected_modules.insert(cell_it.second->type);
+				lhs.selected_modules.insert(cell->type);
 			}
 		}
 	}
@@ -239,22 +260,22 @@ static void select_op_submod(RTLIL::Design *design, RTLIL::Selection &lhs)
 
 static void select_op_cells_to_modules(RTLIL::Design *design, RTLIL::Selection &lhs)
 {
-	RTLIL::Selection new_sel(false);
-	for (auto &mod_it : design->modules_)
-		if (lhs.selected_module(mod_it.first))
-			for (auto &cell_it : mod_it.second->cells_)
-				if (lhs.selected_member(mod_it.first, cell_it.first) && design->modules_.count(cell_it.second->type))
-					new_sel.selected_modules.insert(cell_it.second->type);
+	RTLIL::Selection new_sel(false, lhs.selects_boxes, design);
+	for (auto mod : design->modules())
+		if (lhs.selected_module(mod->name))
+			for (auto cell : mod->cells())
+				if (lhs.selected_member(mod->name, cell->name) && (design->module(cell->type) != nullptr))
+					new_sel.selected_modules.insert(cell->type);
 	lhs = new_sel;
 }
 
 static void select_op_module_to_cells(RTLIL::Design *design, RTLIL::Selection &lhs)
 {
-	RTLIL::Selection new_sel(false);
-	for (auto &mod_it : design->modules_)
-		for (auto &cell_it : mod_it.second->cells_)
-			if (design->modules_.count(cell_it.second->type) && lhs.selected_whole_module(cell_it.second->type))
-				new_sel.selected_members[mod_it.first].insert(cell_it.first);
+	RTLIL::Selection new_sel(false, lhs.selects_boxes, design);
+	for (auto mod : design->modules())
+		for (auto cell : mod->cells())
+			if ((design->module(cell->type) != nullptr) && lhs.selected_whole_module(cell->type))
+				new_sel.selected_members[mod->name].insert(cell->name);
 	lhs = new_sel;
 }
 
@@ -268,37 +289,59 @@ static void select_op_fullmod(RTLIL::Design *design, RTLIL::Selection &lhs)
 
 static void select_op_alias(RTLIL::Design *design, RTLIL::Selection &lhs)
 {
-	for (auto &mod_it : design->modules_)
+	for (auto mod : design->modules())
 	{
-		if (lhs.selected_whole_module(mod_it.first))
+		if (!lhs.selects_boxes && mod->get_blackbox_attribute())
 			continue;
-		if (!lhs.selected_module(mod_it.first))
+		if (lhs.selected_whole_module(mod->name))
+			continue;
+		if (!lhs.selected_module(mod->name))
 			continue;
 
-		SigMap sigmap(mod_it.second);
+		SigMap sigmap(mod);
 		SigPool selected_bits;
 
-		for (auto &it : mod_it.second->wires_)
-			if (lhs.selected_member(mod_it.first, it.first))
-				selected_bits.add(sigmap(it.second));
+		for (auto wire : mod->wires())
+			if (lhs.selected_member(mod->name, wire->name))
+				selected_bits.add(sigmap(wire));
 
-		for (auto &it : mod_it.second->wires_)
-			if (!lhs.selected_member(mod_it.first, it.first) && selected_bits.check_any(sigmap(it.second)))
-				lhs.selected_members[mod_it.first].insert(it.first);
+		for (auto wire : mod->wires())
+			if (!lhs.selected_member(mod->name, wire->name) && selected_bits.check_any(sigmap(wire)))
+				lhs.selected_members[mod->name].insert(wire->name);
 	}
 }
 
-static void select_op_union(RTLIL::Design*, RTLIL::Selection &lhs, const RTLIL::Selection &rhs)
+static void select_op_union(RTLIL::Design* design, RTLIL::Selection &lhs, const RTLIL::Selection &rhs)
 {
-	if (rhs.full_selection) {
-		lhs.full_selection = true;
-		lhs.selected_modules.clear();
-		lhs.selected_members.clear();
+	if (lhs.complete_selection)
+		return;
+	else if (rhs.complete_selection) {
+		lhs.complete_selection = true;
+		lhs.optimize(design);
 		return;
 	}
 
-	if (lhs.full_selection)
+	if (rhs.selects_boxes) {
+		if (lhs.full_selection) {
+			select_all(design, lhs);
+		}
+		lhs.selects_boxes = true;
+	}
+	else if (lhs.full_selection)
 		return;
+
+	if (rhs.full_selection) {
+		if (lhs.selects_boxes) {
+			auto new_rhs = RTLIL::Selection(rhs);
+			select_all(design, new_rhs);
+			for (auto mod : new_rhs.selected_modules)
+				lhs.selected_modules.insert(mod);
+		} else {
+			lhs.clear();
+			lhs.full_selection = true;
+		}
+		return;
+	}
 
 	for (auto &it : rhs.selected_members)
 		for (auto &it2 : it.second)
@@ -312,20 +355,30 @@ static void select_op_union(RTLIL::Design*, RTLIL::Selection &lhs, const RTLIL::
 
 static void select_op_diff(RTLIL::Design *design, RTLIL::Selection &lhs, const RTLIL::Selection &rhs)
 {
-	if (rhs.full_selection) {
-		lhs.full_selection = false;
-		lhs.selected_modules.clear();
-		lhs.selected_members.clear();
+	if (rhs.complete_selection) {
+		lhs.clear();
 		return;
 	}
 
-	if (lhs.full_selection) {
-		if (!rhs.full_selection && rhs.selected_modules.size() == 0 && rhs.selected_members.size() == 0)
-			return;
-		lhs.full_selection = false;
-		for (auto &it : design->modules_)
-			lhs.selected_modules.insert(it.first);
+	if (rhs.full_selection) {
+		if (lhs.selects_boxes) {
+			auto new_rhs = RTLIL::Selection(rhs);
+			select_all(design, new_rhs);
+			select_all(design, lhs);
+			for (auto mod : new_rhs.selected_modules) {
+				lhs.selected_modules.erase(mod);
+				lhs.selected_members.erase(mod);
+			}
+		} else {
+			lhs.clear();
+		}
+		return;
 	}
+
+	if (rhs.empty() || lhs.empty())
+		return;
+
+	select_all(design, lhs);
 
 	for (auto &it : rhs.selected_modules) {
 		lhs.selected_modules.erase(it);
@@ -334,19 +387,19 @@ static void select_op_diff(RTLIL::Design *design, RTLIL::Selection &lhs, const R
 
 	for (auto &it : rhs.selected_members)
 	{
-		if (design->modules_.count(it.first) == 0)
+		if (design->module(it.first) == nullptr)
 			continue;
 
-		RTLIL::Module *mod = design->modules_[it.first];
+		RTLIL::Module *mod = design->module(it.first);
 
 		if (lhs.selected_modules.count(mod->name) > 0)
 		{
-			for (auto &it : mod->wires_)
-				lhs.selected_members[mod->name].insert(it.first);
+			for (auto wire : mod->wires())
+				lhs.selected_members[mod->name].insert(wire->name);
 			for (auto &it : mod->memories)
 				lhs.selected_members[mod->name].insert(it.first);
-			for (auto &it : mod->cells_)
-				lhs.selected_members[mod->name].insert(it.first);
+			for (auto cell : mod->cells())
+				lhs.selected_members[mod->name].insert(cell->name);
 			for (auto &it : mod->processes)
 				lhs.selected_members[mod->name].insert(it.first);
 			lhs.selected_modules.erase(mod->name);
@@ -362,38 +415,46 @@ static void select_op_diff(RTLIL::Design *design, RTLIL::Selection &lhs, const R
 
 static void select_op_intersect(RTLIL::Design *design, RTLIL::Selection &lhs, const RTLIL::Selection &rhs)
 {
-	if (rhs.full_selection)
+	if (rhs.complete_selection)
 		return;
 
-	if (lhs.full_selection) {
-		lhs.full_selection = false;
-		for (auto &it : design->modules_)
-			lhs.selected_modules.insert(it.first);
+	if (rhs.full_selection && !lhs.selects_boxes)
+		return;
+
+	if (lhs.empty())
+		return;
+
+	if (rhs.empty()) {
+		lhs.clear();
+		return;
 	}
+
+	select_all(design, lhs);
 
 	std::vector<RTLIL::IdString> del_list;
 
-	for (auto &it : lhs.selected_modules)
-		if (rhs.selected_modules.count(it) == 0) {
-			if (rhs.selected_members.count(it) > 0)
-				for (auto &it2 : rhs.selected_members.at(it))
-					lhs.selected_members[it].insert(it2);
-			del_list.push_back(it);
-		}
+	for (auto mod_name : lhs.selected_modules) {
+		if (rhs.selected_whole_module(mod_name))
+			continue;
+		if (rhs.selected_module(mod_name))
+			for (auto memb_name : rhs.selected_members.at(mod_name))
+				lhs.selected_members[mod_name].insert(memb_name);
+		del_list.push_back(mod_name);
+	}
 	for (auto &it : del_list)
 		lhs.selected_modules.erase(it);
 
 	del_list.clear();
 	for (auto &it : lhs.selected_members) {
-		if (rhs.selected_modules.count(it.first) > 0)
+		if (rhs.selected_whole_module(it.first))
 			continue;
-		if (rhs.selected_members.count(it.first) == 0) {
+		if (!rhs.selected_module(it.first)) {
 			del_list.push_back(it.first);
 			continue;
 		}
 		std::vector<RTLIL::IdString> del_list2;
 		for (auto &it2 : it.second)
-			if (rhs.selected_members.at(it.first).count(it2) == 0)
+			if (!rhs.selected_member(it.first, it2))
 				del_list2.push_back(it2);
 		for (auto &it2 : del_list2)
 			it.second.erase(it2);
@@ -411,7 +472,7 @@ namespace {
 	};
 }
 
-static int parse_comma_list(std::set<RTLIL::IdString> &tokens, std::string str, size_t pos, std::string stopchar)
+static int parse_comma_list(std::set<RTLIL::IdString> &tokens, const std::string &str, size_t pos, std::string stopchar)
 {
 	stopchar += ',';
 	while (1) {
@@ -431,18 +492,17 @@ static int select_op_expand(RTLIL::Design *design, RTLIL::Selection &lhs, std::v
 {
 	int sel_objects = 0;
 	bool is_input, is_output;
-	for (auto &mod_it : design->modules_)
+	for (auto mod : design->modules())
 	{
-		if (lhs.selected_whole_module(mod_it.first) || !lhs.selected_module(mod_it.first))
+		if (lhs.selected_whole_module(mod->name) || !lhs.selected_module(mod->name))
 			continue;
 
-		RTLIL::Module *mod = mod_it.second;
 		std::set<RTLIL::Wire*> selected_wires;
 		auto selected_members = lhs.selected_members[mod->name];
 
-		for (auto &it : mod->wires_)
-			if (lhs.selected_member(mod_it.first, it.first) && limits.count(it.first) == 0)
-				selected_wires.insert(it.second);
+		for (auto wire : mod->wires())
+			if (lhs.selected_member(mod->name, wire->name) && limits.count(wire->name) == 0)
+				selected_wires.insert(wire);
 
 		for (auto &conn : mod->connections())
 		{
@@ -450,7 +510,7 @@ static int select_op_expand(RTLIL::Design *design, RTLIL::Selection &lhs, std::v
 			std::vector<RTLIL::SigBit> conn_rhs = conn.second.to_sigbit_vector();
 
 			for (size_t i = 0; i < conn_lhs.size(); i++) {
-				if (conn_lhs[i].wire == NULL || conn_rhs[i].wire == NULL)
+				if (conn_lhs[i].wire == nullptr || conn_rhs[i].wire == nullptr)
 					continue;
 				if (mode != 'i' && selected_wires.count(conn_rhs[i].wire) && selected_members.count(conn_lhs[i].wire->name) == 0)
 					lhs.selected_members[mod->name].insert(conn_lhs[i].wire->name), sel_objects++, max_objects--;
@@ -459,15 +519,15 @@ static int select_op_expand(RTLIL::Design *design, RTLIL::Selection &lhs, std::v
 			}
 		}
 
-		for (auto &cell : mod->cells_)
-		for (auto &conn : cell.second->connections())
+		for (auto cell : mod->cells())
+		for (auto &conn : cell->connections())
 		{
 			char last_mode = '-';
-			if (eval_only && !yosys_celltypes.cell_evaluable(cell.second->type))
+			if (eval_only && !yosys_celltypes.cell_evaluable(cell->type))
 				goto exclude_match;
 			for (auto &rule : rules) {
 				last_mode = rule.mode;
-				if (rule.cell_types.size() > 0 && rule.cell_types.count(cell.second->type) == 0)
+				if (rule.cell_types.size() > 0 && rule.cell_types.count(cell->type) == 0)
 					continue;
 				if (rule.port_names.size() > 0 && rule.port_names.count(conn.first) == 0)
 					continue;
@@ -479,14 +539,14 @@ static int select_op_expand(RTLIL::Design *design, RTLIL::Selection &lhs, std::v
 			if (last_mode == '+')
 				goto exclude_match;
 		include_match:
-			is_input = mode == 'x' || ct.cell_input(cell.second->type, conn.first);
-			is_output = mode == 'x' || ct.cell_output(cell.second->type, conn.first);
+			is_input = mode == 'x' || ct.cell_input(cell->type, conn.first);
+			is_output = mode == 'x' || ct.cell_output(cell->type, conn.first);
 			for (auto &chunk : conn.second.chunks())
-				if (chunk.wire != NULL) {
-					if (max_objects != 0 && selected_wires.count(chunk.wire) > 0 && selected_members.count(cell.first) == 0)
+				if (chunk.wire != nullptr) {
+					if (max_objects != 0 && selected_wires.count(chunk.wire) > 0 && selected_members.count(cell->name) == 0)
 						if (mode == 'x' || (mode == 'i' && is_output) || (mode == 'o' && is_input))
-							lhs.selected_members[mod->name].insert(cell.first), sel_objects++, max_objects--;
-					if (max_objects != 0 && selected_members.count(cell.first) > 0 && limits.count(cell.first) == 0 && selected_members.count(chunk.wire->name) == 0)
+							lhs.selected_members[mod->name].insert(cell->name), sel_objects++, max_objects--;
+					if (max_objects != 0 && selected_members.count(cell->name) > 0 && limits.count(cell->name) == 0 && selected_members.count(chunk.wire->name) == 0)
 						if (mode == 'x' || (mode == 'i' && is_input) || (mode == 'o' && is_output))
 							lhs.selected_members[mod->name].insert(chunk.wire->name), sel_objects++, max_objects--;
 				}
@@ -497,7 +557,7 @@ static int select_op_expand(RTLIL::Design *design, RTLIL::Selection &lhs, std::v
 	return sel_objects;
 }
 
-static void select_op_expand(RTLIL::Design *design, std::string arg, char mode, bool eval_only)
+static void select_op_expand(RTLIL::Design *design, const std::string &arg, char mode, bool eval_only)
 {
 	int pos = (mode == 'x' ? 2 : 3) + (eval_only ? 1 : 0);
 	int levels = 1, rem_objects = -1;
@@ -532,7 +592,7 @@ static void select_op_expand(RTLIL::Design *design, std::string arg, char mode, 
 
 	while (pos < int(arg.size())) {
 		if (arg[pos] != ':' || pos+1 == int(arg.size()))
-			log_cmd_error("Syntax error in expand operator '%s'.\n", arg.c_str());
+			log_cmd_error("Syntax error in expand operator '%s'.\n", arg);
 		pos++;
 		if (arg[pos] == '+' || arg[pos] == '-') {
 			expand_rule_t rule;
@@ -557,7 +617,7 @@ static void select_op_expand(RTLIL::Design *design, std::string arg, char mode, 
 						for (auto i2 : i1.second)
 							limits.insert(i2);
 					} else
-						log_cmd_error("Selection %s is not defined!\n", RTLIL::unescape_id(str).c_str());
+						log_cmd_error("Selection %s is not defined!\n", RTLIL::unescape_id(str));
 				} else
 					limits.insert(RTLIL::escape_id(str));
 			}
@@ -572,20 +632,20 @@ static void select_op_expand(RTLIL::Design *design, std::string arg, char mode, 
 		if (rule.cell_types.size() > 0) {
 			log("    cell types:");
 			for (auto &it : rule.cell_types)
-				log(" %s", it.c_str());
+				log(" %s", it);
 			log("\n");
 		}
 		if (rule.port_names.size() > 0) {
 			log("    port names:");
 			for (auto &it : rule.port_names)
-				log(" %s", it.c_str());
+				log(" %s", it);
 			log("\n");
 		}
 	}
 	if (limits.size() > 0) {
 		log("  limits:");
 		for (auto &it : limits)
-			log(" %s", it.c_str());
+			log(" %s", it);
 		log("\n");
 	}
 #endif
@@ -598,7 +658,7 @@ static void select_op_expand(RTLIL::Design *design, std::string arg, char mode, 
 	}
 
 	if (rem_objects == 0)
-		log_warning("reached configured limit at `%s'.\n", arg.c_str());
+		log_warning("reached configured limit at `%s'.\n", arg);
 }
 
 static void select_filter_active_mod(RTLIL::Design *design, RTLIL::Selection &sel)
@@ -607,9 +667,7 @@ static void select_filter_active_mod(RTLIL::Design *design, RTLIL::Selection &se
 		return;
 
 	if (sel.full_selection) {
-		sel.full_selection = false;
-		sel.selected_modules.clear();
-		sel.selected_members.clear();
+		sel.clear();
 		sel.selected_modules.insert(design->selected_active_module);
 		return;
 	}
@@ -627,17 +685,22 @@ static void select_filter_active_mod(RTLIL::Design *design, RTLIL::Selection &se
 	}
 }
 
-static void select_stmt(RTLIL::Design *design, std::string arg)
+static void select_stmt(RTLIL::Design *design, std::string arg, bool disable_empty_warning = false)
 {
 	std::string arg_mod, arg_memb;
+	std::unordered_map<std::string, bool> arg_mod_found;
+	std::unordered_map<std::string, bool> arg_memb_found;
+
+	auto isprefixed = [](const string &s) {
+		return GetSize(s) >= 2 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) && s[1] == ':';
+	};
 
 	if (arg.size() == 0)
 		return;
 
 	if (arg[0] == '%') {
 		if (arg == "%") {
-			if (design->selection_stack.size() > 0)
-				work_stack.push_back(design->selection_stack.back());
+			work_stack.push_back(design->selection());
 		} else
 		if (arg == "%%") {
 			while (work_stack.size() > 1) {
@@ -664,7 +727,7 @@ static void select_stmt(RTLIL::Design *design, std::string arg)
 		} else
 		if (arg == "%D") {
 			if (work_stack.size() < 2)
-				log_cmd_error("Must have at least two elements on the stack for operator %%d.\n");
+				log_cmd_error("Must have at least two elements on the stack for operator %%D.\n");
 			select_op_diff(design, work_stack[work_stack.size()-1], work_stack[work_stack.size()-2]);
 			work_stack[work_stack.size()-2] = work_stack[work_stack.size()-1];
 			work_stack.pop_back();
@@ -693,7 +756,7 @@ static void select_stmt(RTLIL::Design *design, std::string arg)
 		} else
 		if (arg == "%C") {
 			if (work_stack.size() < 1)
-				log_cmd_error("Must have at least one element on the stack for operator %%M.\n");
+				log_cmd_error("Must have at least one element on the stack for operator %%C.\n");
 			select_op_module_to_cells(design, work_stack[work_stack.size()-1]);
 		} else
 		if (arg == "%c") {
@@ -711,37 +774,37 @@ static void select_stmt(RTLIL::Design *design, std::string arg)
 				log_cmd_error("Must have at least one element on the stack for operator %%a.\n");
 			select_op_alias(design, work_stack[work_stack.size()-1]);
 		} else
-		if (arg == "%x" || (arg.size() > 2 && arg.substr(0, 2) == "%x" && (arg[2] == ':' || arg[2] == '*' || arg[2] == '.' || ('0' <= arg[2] && arg[2] <= '9')))) {
+		if (arg == "%x" || (arg.size() > 2 && arg.compare(0, 2, "%x") == 0 && (arg[2] == ':' || arg[2] == '*' || arg[2] == '.' || ('0' <= arg[2] && arg[2] <= '9')))) {
 			if (work_stack.size() < 1)
 				log_cmd_error("Must have at least one element on the stack for operator %%x.\n");
 			select_op_expand(design, arg, 'x', false);
 		} else
-		if (arg == "%ci" || (arg.size() > 3 && arg.substr(0, 3) == "%ci" && (arg[3] == ':' || arg[3] == '*' || arg[3] == '.' || ('0' <= arg[3] && arg[3] <= '9')))) {
+		if (arg == "%ci" || (arg.size() > 3 && arg.compare(0, 3, "%ci") == 0 && (arg[3] == ':' || arg[3] == '*' || arg[3] == '.' || ('0' <= arg[3] && arg[3] <= '9')))) {
 			if (work_stack.size() < 1)
 				log_cmd_error("Must have at least one element on the stack for operator %%ci.\n");
 			select_op_expand(design, arg, 'i', false);
 		} else
-		if (arg == "%co" || (arg.size() > 3 && arg.substr(0, 3) == "%co" && (arg[3] == ':' || arg[3] == '*' || arg[3] == '.' || ('0' <= arg[3] && arg[3] <= '9')))) {
+		if (arg == "%co" || (arg.size() > 3 && arg.compare(0, 3, "%co") == 0 && (arg[3] == ':' || arg[3] == '*' || arg[3] == '.' || ('0' <= arg[3] && arg[3] <= '9')))) {
 			if (work_stack.size() < 1)
 				log_cmd_error("Must have at least one element on the stack for operator %%co.\n");
 			select_op_expand(design, arg, 'o', false);
 		} else
-		if (arg == "%xe" || (arg.size() > 3 && arg.substr(0, 3) == "%xe" && (arg[3] == ':' || arg[3] == '*' || arg[3] == '.' || ('0' <= arg[3] && arg[3] <= '9')))) {
+		if (arg == "%xe" || (arg.size() > 3 && arg.compare(0, 3, "%xe") == 0 && (arg[3] == ':' || arg[3] == '*' || arg[3] == '.' || ('0' <= arg[3] && arg[3] <= '9')))) {
 			if (work_stack.size() < 1)
 				log_cmd_error("Must have at least one element on the stack for operator %%xe.\n");
 			select_op_expand(design, arg, 'x', true);
 		} else
-		if (arg == "%cie" || (arg.size() > 4 && arg.substr(0, 4) == "%cie" && (arg[4] == ':' || arg[4] == '*' || arg[4] == '.' || ('0' <= arg[4] && arg[4] <= '9')))) {
+		if (arg == "%cie" || (arg.size() > 4 && arg.compare(0, 4, "%cie") == 0 && (arg[4] == ':' || arg[4] == '*' || arg[4] == '.' || ('0' <= arg[4] && arg[4] <= '9')))) {
 			if (work_stack.size() < 1)
 				log_cmd_error("Must have at least one element on the stack for operator %%cie.\n");
 			select_op_expand(design, arg, 'i', true);
 		} else
-		if (arg == "%coe" || (arg.size() > 4 && arg.substr(0, 4) == "%coe" && (arg[4] == ':' || arg[4] == '*' || arg[4] == '.' || ('0' <= arg[4] && arg[4] <= '9')))) {
+		if (arg == "%coe" || (arg.size() > 4 && arg.compare(0, 4, "%coe") == 0 && (arg[4] == ':' || arg[4] == '*' || arg[4] == '.' || ('0' <= arg[4] && arg[4] <= '9')))) {
 			if (work_stack.size() < 1)
 				log_cmd_error("Must have at least one element on the stack for operator %%coe.\n");
 			select_op_expand(design, arg, 'o', true);
 		} else
-			log_cmd_error("Unknown selection operator '%s'.\n", arg.c_str());
+			log_cmd_error("Unknown selection operator '%s'.\n", arg);
 		if (work_stack.size() >= 1)
 			select_filter_active_mod(design, work_stack.back());
 		return;
@@ -752,170 +815,218 @@ static void select_stmt(RTLIL::Design *design, std::string arg)
 		if (design->selection_vars.count(set_name) > 0)
 			work_stack.push_back(design->selection_vars[set_name]);
 		else
-			log_cmd_error("Selection @%s is not defined!\n", RTLIL::unescape_id(set_name).c_str());
+			log_cmd_error("Selection @%s is not defined!\n", RTLIL::unescape_id(set_name));
 		select_filter_active_mod(design, work_stack.back());
 		return;
+	}
+
+	bool select_blackboxes = false;
+	if (arg.substr(0, 1) == "=") {
+		arg = arg.substr(1);
+		select_blackboxes = true;
 	}
 
 	if (!design->selected_active_module.empty()) {
 		arg_mod = design->selected_active_module;
 		arg_memb = arg;
+		if (!isprefixed(arg_memb))
+			arg_memb_found[arg_memb] = false;
 	} else
-	if (GetSize(arg) >= 2 && arg[0] >= 'a' && arg[0] <= 'z' && arg[1] == ':') {
+	if (isprefixed(arg) && arg[0] >= 'a' && arg[0] <= 'z') {
 		arg_mod = "*", arg_memb = arg;
 	} else {
 		size_t pos = arg.find('/');
 		if (pos == std::string::npos) {
-			if (arg.find(':') == std::string::npos || arg.substr(0, 1) == "A")
-				arg_mod = arg;
-			else
-				arg_mod = "*", arg_memb = arg;
+			arg_mod = arg;
+			if (!isprefixed(arg_mod))
+				arg_mod_found[arg_mod] = false;
 		} else {
 			arg_mod = arg.substr(0, pos);
+			if (!isprefixed(arg_mod))
+				arg_mod_found[arg_mod] = false;
 			arg_memb = arg.substr(pos+1);
+			if (!isprefixed(arg_memb))
+				arg_memb_found[arg_memb] = false;
 		}
 	}
 
-	work_stack.push_back(RTLIL::Selection());
+	bool full_selection = (arg == "*" && arg_mod == "*");
+	work_stack.push_back(RTLIL::Selection(full_selection, select_blackboxes, design));
 	RTLIL::Selection &sel = work_stack.back();
 
-	if (arg == "*" && arg_mod == "*") {
+	if (sel.full_selection) {
+		if (sel.selects_boxes) sel.optimize(design);
 		select_filter_active_mod(design, work_stack.back());
 		return;
 	}
 
-	sel.full_selection = false;
-	for (auto &mod_it : design->modules_)
+	for (auto mod : design->modules())
 	{
-		if (arg_mod.substr(0, 2) == "A:") {
-			if (!match_attr(mod_it.second->attributes, arg_mod.substr(2)))
-				continue;
-		} else
-		if (!match_ids(mod_it.first, arg_mod))
+		if (!select_blackboxes && mod->get_blackbox_attribute())
 			continue;
 
+		if (arg_mod.compare(0, 2, "A:") == 0) {
+			if (!match_attr(mod->attributes, arg_mod.substr(2)))
+				continue;
+		} else
+		if (arg_mod.compare(0, 2, "N:") == 0) {
+			if (!match_ids(mod->name, arg_mod.substr(2)))
+				continue;
+		} else
+		if (!match_ids(mod->name, arg_mod))
+			continue;
+		else
+			arg_mod_found[arg_mod] = true;
+
 		if (arg_memb == "") {
-			sel.selected_modules.insert(mod_it.first);
+			sel.selected_modules.insert(mod->name);
 			continue;
 		}
 
-		RTLIL::Module *mod = mod_it.second;
-		if (arg_memb.substr(0, 2) == "w:") {
-			for (auto &it : mod->wires_)
-				if (match_ids(it.first, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "w:") == 0) {
+			for (auto wire : mod->wires())
+				if (match_ids(wire->name, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(wire->name);
 		} else
-		if (arg_memb.substr(0, 2) == "i:") {
-			for (auto &it : mod->wires_)
-				if (it.second->port_input && match_ids(it.first, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "i:") == 0) {
+			for (auto wire : mod->wires())
+				if (wire->port_input && match_ids(wire->name, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(wire->name);
 		} else
-		if (arg_memb.substr(0, 2) == "o:") {
-			for (auto &it : mod->wires_)
-				if (it.second->port_output && match_ids(it.first, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "o:") == 0) {
+			for (auto wire : mod->wires())
+				if (wire->port_output && match_ids(wire->name, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(wire->name);
 		} else
-		if (arg_memb.substr(0, 2) == "x:") {
-			for (auto &it : mod->wires_)
-				if ((it.second->port_input || it.second->port_output) && match_ids(it.first, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "x:") == 0) {
+			for (auto wire : mod->wires())
+				if ((wire->port_input || wire->port_output) && match_ids(wire->name, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(wire->name);
 		} else
-		if (arg_memb.substr(0, 2) == "s:") {
+		if (arg_memb.compare(0, 2, "s:") == 0) {
 			size_t delim = arg_memb.substr(2).find(':');
 			if (delim == std::string::npos) {
 				int width = atoi(arg_memb.substr(2).c_str());
-				for (auto &it : mod->wires_)
-					if (it.second->width == width)
-						sel.selected_members[mod->name].insert(it.first);
+				for (auto wire : mod->wires())
+					if (wire->width == width)
+						sel.selected_members[mod->name].insert(wire->name);
 			} else {
 				std::string min_str = arg_memb.substr(2, delim);
 				std::string max_str = arg_memb.substr(2+delim+1);
 				int min_width = min_str.empty() ? 0 : atoi(min_str.c_str());
 				int max_width = max_str.empty() ? -1 : atoi(max_str.c_str());
-				for (auto &it : mod->wires_)
-					if (min_width <= it.second->width && (it.second->width <= max_width || max_width == -1))
-						sel.selected_members[mod->name].insert(it.first);
+				for (auto wire : mod->wires())
+					if (min_width <= wire->width && (wire->width <= max_width || max_width == -1))
+						sel.selected_members[mod->name].insert(wire->name);
 			}
 		} else
-		if (arg_memb.substr(0, 2) == "m:") {
+		if (arg_memb.compare(0, 2, "m:") == 0) {
 			for (auto &it : mod->memories)
 				if (match_ids(it.first, arg_memb.substr(2)))
 					sel.selected_members[mod->name].insert(it.first);
 		} else
-		if (arg_memb.substr(0, 2) == "c:") {
-			for (auto &it : mod->cells_)
-				if (match_ids(it.first, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "c:") == 0) {
+			for (auto cell : mod->cells())
+				if (match_ids(cell->name, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(cell->name);
 		} else
-		if (arg_memb.substr(0, 2) == "t:") {
-			for (auto &it : mod->cells_)
-				if (match_ids(it.second->type, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "t:") == 0) {
+			if (arg_memb.compare(2, 1, "@") == 0) {
+				std::string set_name = RTLIL::escape_id(arg_memb.substr(3));
+				if (!design->selection_vars.count(set_name))
+					log_cmd_error("Selection @%s is not defined!\n", RTLIL::unescape_id(set_name));
+
+				auto &muster = design->selection_vars[set_name];
+				for (auto cell : mod->cells())
+					if (muster.selected_modules.count(cell->type))
+						sel.selected_members[mod->name].insert(cell->name);
+			} else {
+				for (auto cell : mod->cells())
+					if (match_ids(cell->type, arg_memb.substr(2)))
+						sel.selected_members[mod->name].insert(cell->name);
+			}
 		} else
-		if (arg_memb.substr(0, 2) == "p:") {
+		if (arg_memb.compare(0, 2, "p:") == 0) {
 			for (auto &it : mod->processes)
 				if (match_ids(it.first, arg_memb.substr(2)))
 					sel.selected_members[mod->name].insert(it.first);
 		} else
-		if (arg_memb.substr(0, 2) == "a:") {
-			for (auto &it : mod->wires_)
-				if (match_attr(it.second->attributes, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "a:") == 0) {
+			for (auto wire : mod->wires())
+				if (match_attr(wire->attributes, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(wire->name);
 			for (auto &it : mod->memories)
 				if (match_attr(it.second->attributes, arg_memb.substr(2)))
 					sel.selected_members[mod->name].insert(it.first);
-			for (auto &it : mod->cells_)
-				if (match_attr(it.second->attributes, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+			for (auto cell : mod->cells())
+				if (match_attr(cell->attributes, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(cell->name);
 			for (auto &it : mod->processes)
 				if (match_attr(it.second->attributes, arg_memb.substr(2)))
 					sel.selected_members[mod->name].insert(it.first);
 		} else
-		if (arg_memb.substr(0, 2) == "r:") {
-			for (auto &it : mod->cells_)
-				if (match_attr(it.second->parameters, arg_memb.substr(2)))
-					sel.selected_members[mod->name].insert(it.first);
+		if (arg_memb.compare(0, 2, "r:") == 0) {
+			for (auto cell : mod->cells())
+				if (match_attr(cell->parameters, arg_memb.substr(2)))
+					sel.selected_members[mod->name].insert(cell->name);
 		} else {
-			if (arg_memb.substr(0, 2) == "n:")
+			std::string orig_arg_memb = arg_memb;
+			if (arg_memb.compare(0, 2, "n:") == 0)
 				arg_memb = arg_memb.substr(2);
-			for (auto &it : mod->wires_)
-				if (match_ids(it.first, arg_memb))
-					sel.selected_members[mod->name].insert(it.first);
+			for (auto wire : mod->wires())
+				if (match_ids(wire->name, arg_memb)) {
+					sel.selected_members[mod->name].insert(wire->name);
+					arg_memb_found[orig_arg_memb] = true;
+				}
 			for (auto &it : mod->memories)
-				if (match_ids(it.first, arg_memb))
+				if (match_ids(it.first, arg_memb)) {
 					sel.selected_members[mod->name].insert(it.first);
-			for (auto &it : mod->cells_)
-				if (match_ids(it.first, arg_memb))
-					sel.selected_members[mod->name].insert(it.first);
+					arg_memb_found[orig_arg_memb] = true;
+				}
+			for (auto cell : mod->cells())
+				if (match_ids(cell->name, arg_memb)) {
+					sel.selected_members[mod->name].insert(cell->name);
+					arg_memb_found[orig_arg_memb] = true;
+				}
 			for (auto &it : mod->processes)
-				if (match_ids(it.first, arg_memb))
+				if (match_ids(it.first, arg_memb)) {
 					sel.selected_members[mod->name].insert(it.first);
+					arg_memb_found[orig_arg_memb] = true;
+				}
 		}
 	}
 
 	select_filter_active_mod(design, work_stack.back());
-}
 
-static std::string describe_selection_for_assert(RTLIL::Design *design, RTLIL::Selection *sel)
-{
-	std::string desc = "Selection contains:\n";
-	for (auto mod_it : design->modules_)
-	{
-		if (sel->selected_module(mod_it.first)) {
-			for (auto &it : mod_it.second->wires_)
-				if (sel->selected_member(mod_it.first, it.first))
-					desc += stringf("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first));
-			for (auto &it : mod_it.second->memories)
-				if (sel->selected_member(mod_it.first, it.first))
-					desc += stringf("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first));
-			for (auto &it : mod_it.second->cells_)
-				if (sel->selected_member(mod_it.first, it.first))
-					desc += stringf("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first));
-			for (auto &it : mod_it.second->processes)
-				if (sel->selected_member(mod_it.first, it.first))
-					desc += stringf("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first));
+	for (auto &it : arg_mod_found) {
+		if (it.second == false && !disable_empty_warning) {
+			std::string selection_str = select_blackboxes ? "=" : "";
+			selection_str += it.first;
+			log_warning("Selection \"%s\" did not match any module.\n", selection_str);
 		}
 	}
+	for (auto &it : arg_memb_found) {
+		if (it.second == false && !disable_empty_warning) {
+			std::string selection_str = select_blackboxes ? "=" : "";
+			selection_str += it.first;
+			log_warning("Selection \"%s\" did not match any object.\n", selection_str);
+		}
+	}
+}
+
+static std::string describe_selection_for_assert(RTLIL::Design *design, RTLIL::Selection *sel, bool whole_modules = false)
+{
+	bool push_selection = &design->selection() != sel;
+	if (push_selection) design->push_selection(*sel);
+	std::string desc = "Selection contains:\n";
+	for (auto mod : design->all_selected_modules())
+	{
+		if (whole_modules && sel->selected_whole_module(mod->name))
+			desc += stringf("%s\n", id2cstr(mod->name));
+		for (auto it : mod->selected_members())
+			desc += stringf("%s/%s\n", id2cstr(mod->name), id2cstr(it->name));
+	}
+	if (push_selection) design->pop_selection();
 	return desc;
 }
 
@@ -923,12 +1034,12 @@ PRIVATE_NAMESPACE_END
 YOSYS_NAMESPACE_BEGIN
 
 // used in kernel/register.cc and maybe other locations, extern decl. in register.h
-void handle_extra_select_args(Pass *pass, vector<string> args, size_t argidx, size_t args_size, RTLIL::Design *design)
+void handle_extra_select_args(Pass *pass, const vector<string> &args, size_t argidx, size_t args_size, RTLIL::Design *design)
 {
 	work_stack.clear();
 	for (; argidx < args_size; argidx++) {
-		if (args[argidx].substr(0, 1) == "-") {
-			if (pass != NULL)
+		if (args[argidx].compare(0, 1, "-") == 0) {
+			if (pass != nullptr)
 				pass->cmd_error(args, argidx, "Unexpected option in selection arguments.");
 			else
 				log_cmd_error("Unexpected option in selection arguments.");
@@ -940,9 +1051,9 @@ void handle_extra_select_args(Pass *pass, vector<string> args, size_t argidx, si
 		work_stack.pop_back();
 	}
 	if (work_stack.empty())
-		design->selection_stack.push_back(RTLIL::Selection(false));
+		design->push_empty_selection();
 	else
-		design->selection_stack.push_back(work_stack.back());
+		design->push_selection(work_stack.back());
 }
 
 // extern decl. in register.h
@@ -956,7 +1067,7 @@ RTLIL::Selection eval_select_args(const vector<string> &args, RTLIL::Design *des
 		work_stack.pop_back();
 	}
 	if (work_stack.empty())
-		return RTLIL::Selection(false);
+		return RTLIL::Selection::EmptySelection(design);
 	return work_stack.back();
 }
 
@@ -973,13 +1084,19 @@ PRIVATE_NAMESPACE_BEGIN
 
 struct SelectPass : public Pass {
 	SelectPass() : Pass("select", "modify and view the list of selected objects") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
 		log("    select [ -add | -del | -set <name> ] {-read <filename> | <selection>}\n");
+		log("    select [ -unset <name> ]\n");
 		log("    select [ <assert_option> ] {-read <filename> | <selection>}\n");
-		log("    select [ -list | -write <filename> | -count | -clear ]\n");
+		log("    select [ -list | -list-mod | -write <filename> | -count | -clear ]\n");
 		log("    select -module <modname>\n");
 		log("\n");
 		log("Most commands use the list of currently selected objects to determine which part\n");
@@ -1000,15 +1117,23 @@ struct SelectPass : public Pass {
 		log("        under the given name (see @<name> below). to save the current selection,\n");
 		log("        use \"select -set <name> %%\"\n");
 		log("\n");
+		log("    -unset <name>\n");
+		log("        do not modify the current selection. instead remove a previously saved\n");
+		log("        selection under the given name (see @<name> below).\n");
+		log("\n");
 		log("    -assert-none\n");
 		log("        do not modify the current selection. instead assert that the given\n");
-		log("        selection is empty. i.e. produce an error if any object matching the\n");
-		log("        selection is found.\n");
+		log("        selection is empty. i.e. produce an error if any object or module\n");
+		log("        matching the selection is found.\n");
 		log("\n");
 		log("    -assert-any\n");
 		log("        do not modify the current selection. instead assert that the given\n");
-		log("        selection is non-empty. i.e. produce an error if no object matching\n");
-		log("        the selection is found.\n");
+		log("        selection is non-empty. i.e. produce an error if no object or module\n");
+		log("        matching the selection is found.\n");
+		log("\n");
+		log("    -assert-mod-count N\n");
+		log("        do not modify the current selection. instead assert that the given\n");
+		log("        selection contains exactly N modules (partially or fully selected).\n");
 		log("\n");
 		log("    -assert-count N\n");
 		log("        do not modify the current selection. instead assert that the given\n");
@@ -1070,12 +1195,19 @@ struct SelectPass : public Pass {
 		log("    <obj_pattern>\n");
 		log("        select the specified object(s) from the current module\n");
 		log("\n");
+		log("By default, patterns will not match black/white-box modules or their\n");
+		log("contents. To include such objects, prefix the pattern with '='.\n");
+		log("\n");
 		log("A <mod_pattern> can be a module name, wildcard expression (*, ?, [..])\n");
 		log("matching module names, or one of the following:\n");
 		log("\n");
 		log("    A:<pattern>, A:<pattern>=<pattern>\n");
 		log("        all modules with an attribute matching the given pattern\n");
 		log("        in addition to = also <, <=, >=, and > are supported\n");
+		log("\n");
+		log("    N:<pattern>\n");
+		log("        all modules with a name matching the given pattern\n");
+		log("        (i.e. 'N:' is optional as it is the default matching rule)\n");
 		log("\n");
 		log("An <obj_pattern> can be an object name, wildcard expression, or one of\n");
 		log("the following:\n");
@@ -1097,6 +1229,9 @@ struct SelectPass : public Pass {
 		log("\n");
 		log("    t:<pattern>\n");
 		log("        all cells with a type matching the given pattern\n");
+		log("\n");
+		log("    t:@<name>\n");
+		log("        all cells with a type matching a module in the saved selection <name>\n");
 		log("\n");
 		log("    p:<pattern>\n");
 		log("        all processes with a name matching the given pattern\n");
@@ -1190,22 +1325,24 @@ struct SelectPass : public Pass {
 		log("    select */t:SWITCH %%x:+[GATE] */t:SWITCH %%d\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		bool add_mode = false;
 		bool del_mode = false;
 		bool clear_mode = false;
 		bool none_mode = false;
 		bool list_mode = false;
+		bool list_mod_mode = false;
 		bool count_mode = false;
 		bool got_module = false;
 		bool assert_none = false;
 		bool assert_any = false;
+		int assert_modcount = -1;
 		int assert_count = -1;
 		int assert_max = -1;
 		int assert_min = -1;
 		std::string write_file, read_file;
-		std::string set_name, sel_str;
+		std::string set_name, unset_name, sel_str;
 
 		work_stack.clear();
 
@@ -1227,6 +1364,10 @@ struct SelectPass : public Pass {
 			}
 			if (arg == "-assert-any") {
 				assert_any = true;
+				continue;
+			}
+			if (arg == "-assert-mod-count" && argidx+1 < args.size()) {
+				assert_modcount = atoi(args[++argidx].c_str());
 				continue;
 			}
 			if (arg == "-assert-count" && argidx+1 < args.size()) {
@@ -1253,6 +1394,11 @@ struct SelectPass : public Pass {
 				list_mode = true;
 				continue;
 			}
+			if (arg == "-list-mod") {
+				list_mode = true;
+				list_mod_mode = true;
+				continue;
+			}
 			if (arg == "-write" && argidx+1 < args.size()) {
 				write_file = args[++argidx];
 				continue;
@@ -1267,7 +1413,7 @@ struct SelectPass : public Pass {
 			}
 			if (arg == "-module" && argidx+1 < args.size()) {
 				RTLIL::IdString mod_name = RTLIL::escape_id(args[++argidx]);
-				if (design->modules_.count(mod_name) == 0)
+				if (design->module(mod_name) == nullptr)
 					log_cmd_error("No such module: %s\n", id2cstr(mod_name));
 				design->selected_active_module = mod_name.str();
 				got_module = true;
@@ -1277,9 +1423,15 @@ struct SelectPass : public Pass {
 				set_name = RTLIL::escape_id(args[++argidx]);
 				continue;
 			}
+			if (arg == "-unset" && argidx+1 < args.size()) {
+				unset_name = RTLIL::escape_id(args[++argidx]);
+				continue;
+			}
 			if (arg.size() > 0 && arg[0] == '-')
-				log_cmd_error("Unknown option %s.\n", arg.c_str());
-			select_stmt(design, arg);
+				log_cmd_error("Unknown option %s.\n", arg);
+			bool disable_empty_warning = count_mode || assert_none || assert_any || (assert_modcount != -1) ||
+											(assert_count != -1) || (assert_max != -1) || (assert_min != -1);
+			select_stmt(design, arg, disable_empty_warning);
 			sel_str += " " + arg;
 		}
 
@@ -1291,15 +1443,15 @@ struct SelectPass : public Pass {
 			std::ifstream f(read_file);
 			yosys_input_files.insert(read_file);
 			if (f.fail())
-				log_error("Can't open '%s' for reading: %s\n", read_file.c_str(), strerror(errno));
+				log_error("Can't open '%s' for reading: %s\n", read_file, strerror(errno));
 
-			RTLIL::Selection sel(false);
+			auto sel = RTLIL::Selection::EmptySelection(design);
 			string line;
 
 			while (std::getline(f, line)) {
 				size_t slash_pos = line.find('/');
 				if (slash_pos == string::npos) {
-					log_warning("Ignoring line without slash in 'select -read': %s\n", line.c_str());
+					log_warning("Ignoring line without slash in 'select -read': %s\n", line);
 					continue;
 				}
 				IdString mod_name = RTLIL::escape_id(line.substr(0, slash_pos));
@@ -1318,17 +1470,23 @@ struct SelectPass : public Pass {
 		if (none_mode && args.size() != 2)
 			log_cmd_error("Option -none can not be combined with any other options.\n");
 
-		if (add_mode + del_mode + assert_none + assert_any + (assert_count >= 0) + (assert_max >= 0) + (assert_min >= 0) > 1)
-			log_cmd_error("Options -add, -del, -assert-none, -assert-any, assert-count, -assert-max or -assert-min can not be combined.\n");
+		int common_flagset_tally = add_mode + del_mode + assert_none + assert_any + (assert_modcount >= 0) + (assert_count >= 0) + (assert_max >= 0) + (assert_min >= 0);
+		const char *common_flagset = "-add, -del, -assert-none, -assert-any, -assert-mod-count, -assert-count, -assert-max, or -assert-min";
 
-		if ((list_mode || !write_file.empty() || count_mode) && (add_mode || del_mode || assert_none || assert_any || assert_count >= 0 || assert_max >= 0 || assert_min >= 0))
-			log_cmd_error("Options -list, -write and -count can not be combined with -add, -del, -assert-none, -assert-any, assert-count, -assert-max, or -assert-min.\n");
+		if (common_flagset_tally > 1)
+			log_cmd_error("Options %s can not be combined.\n", common_flagset);                
 
-		if (!set_name.empty() && (list_mode || !write_file.empty() || count_mode || add_mode || del_mode || assert_none || assert_any || assert_count >= 0 || assert_max >= 0 || assert_min >= 0))
-			log_cmd_error("Option -set can not be combined with -list, -write, -count, -add, -del, -assert-none, -assert-any, -assert-count, -assert-max, or -assert-min.\n");
+		if ((list_mode || !write_file.empty() || count_mode) && common_flagset_tally)
+			log_cmd_error("Options -list, -list-mod, -write and -count can not be combined with %s.\n", common_flagset);
+
+		if (!set_name.empty() && (list_mode || !write_file.empty() || count_mode || !unset_name.empty() || common_flagset_tally))
+			log_cmd_error("Option -set can not be combined with -list, -write, -count, -unset, %s.\n", common_flagset);
+
+		if (!unset_name.empty() && (list_mode || !write_file.empty() || count_mode || !set_name.empty() || common_flagset_tally))
+			log_cmd_error("Option -unset can not be combined with -list, -write, -count, -set, %s.\n", common_flagset);
 
 		if (work_stack.size() == 0 && got_module) {
-			RTLIL::Selection sel;
+			auto sel = RTLIL::Selection::FullSelection(design);
 			select_filter_active_mod(design, sel);
 			work_stack.push_back(sel);
 		}
@@ -1338,57 +1496,51 @@ struct SelectPass : public Pass {
 			work_stack.pop_back();
 		}
 
-		log_assert(design->selection_stack.size() > 0);
+		log_assert(!design->selection_stack.empty());
 
 		if (clear_mode) {
-			design->selection_stack.back() = RTLIL::Selection(true);
+			design->selection() = RTLIL::Selection::FullSelection(design);
 			design->selected_active_module = std::string();
 			return;
 		}
 
 		if (none_mode) {
-			design->selection_stack.back() = RTLIL::Selection(false);
+			design->selection() = RTLIL::Selection::EmptySelection(design);
 			return;
 		}
 
 		if (list_mode || count_mode || !write_file.empty())
 		{
-		#define LOG_OBJECT(...) { if (list_mode) log(__VA_ARGS__); if (f != NULL) fprintf(f, __VA_ARGS__); total_count++; }
+		#define LOG_OBJECT(...) { if (list_mode) log(__VA_ARGS__); if (f != nullptr) fprintf(f, __VA_ARGS__); total_count++; }
 			int total_count = 0;
-			FILE *f = NULL;
+			FILE *f = nullptr;
 			if (!write_file.empty()) {
 				f = fopen(write_file.c_str(), "w");
 				yosys_output_files.insert(write_file);
-				if (f == NULL)
-					log_error("Can't open '%s' for writing: %s\n", write_file.c_str(), strerror(errno));
+				if (f == nullptr)
+					log_error("Can't open '%s' for writing: %s\n", write_file, strerror(errno));
 			}
-			RTLIL::Selection *sel = &design->selection_stack.back();
 			if (work_stack.size() > 0)
-				sel = &work_stack.back();
+				design->push_selection(work_stack.back());
+			RTLIL::Selection *sel = &design->selection();
 			sel->optimize(design);
-			for (auto mod_it : design->modules_)
+			for (auto mod : design->all_selected_modules())
 			{
-				if (sel->selected_whole_module(mod_it.first) && list_mode)
-					log("%s\n", id2cstr(mod_it.first));
-				if (sel->selected_module(mod_it.first)) {
-					for (auto &it : mod_it.second->wires_)
-						if (sel->selected_member(mod_it.first, it.first))
-							LOG_OBJECT("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first))
-					for (auto &it : mod_it.second->memories)
-						if (sel->selected_member(mod_it.first, it.first))
-							LOG_OBJECT("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first))
-					for (auto &it : mod_it.second->cells_)
-						if (sel->selected_member(mod_it.first, it.first))
-							LOG_OBJECT("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first))
-					for (auto &it : mod_it.second->processes)
-						if (sel->selected_member(mod_it.first, it.first))
-							LOG_OBJECT("%s/%s\n", id2cstr(mod_it.first), id2cstr(it.first))
-				}
+				if (sel->selected_whole_module(mod->name) && list_mode)
+					log("%s\n", id2cstr(mod->name));
+				if (!list_mod_mode)
+					for (auto it : mod->selected_members())
+						LOG_OBJECT("%s/%s\n", id2cstr(mod->name), id2cstr(it->name))
 			}
 			if (count_mode)
+			{
+				design->scratchpad_set_int("select.count", total_count);
 				log("%d objects.\n", total_count);
-			if (f != NULL)
+			}
+			if (f != nullptr)
 				fclose(f);
+			if (work_stack.size() > 0)
+				design->pop_selection();
 		#undef LOG_OBJECT
 			return;
 		}
@@ -1397,8 +1549,8 @@ struct SelectPass : public Pass {
 		{
 			if (work_stack.size() == 0)
 				log_cmd_error("Nothing to add to selection.\n");
-			select_op_union(design, design->selection_stack.back(), work_stack.back());
-			design->selection_stack.back().optimize(design);
+			select_op_union(design, design->selection(), work_stack.back());
+			design->selection().optimize(design);
 			return;
 		}
 
@@ -1406,8 +1558,8 @@ struct SelectPass : public Pass {
 		{
 			if (work_stack.size() == 0)
 				log_cmd_error("Nothing to delete from selection.\n");
-			select_op_diff(design, design->selection_stack.back(), work_stack.back());
-			design->selection_stack.back().optimize(design);
+			select_op_diff(design, design->selection(), work_stack.back());
+			design->selection().optimize(design);
 			return;
 		}
 
@@ -1420,8 +1572,8 @@ struct SelectPass : public Pass {
 			{
 				RTLIL::Selection *sel = &work_stack.back();
 				sel->optimize(design);
-				std::string desc = describe_selection_for_assert(design, sel);
-				log_error("Assertion failed: selection is not empty:%s\n%s", sel_str.c_str(), desc.c_str());
+				std::string desc = describe_selection_for_assert(design, sel, true);
+				log_error("Assertion failed: selection is not empty:%s\n%s", sel_str, desc);
 			}
 			return;
 		}
@@ -1435,34 +1587,30 @@ struct SelectPass : public Pass {
 			{
 				RTLIL::Selection *sel = &work_stack.back();
 				sel->optimize(design);
-				std::string desc = describe_selection_for_assert(design, sel);
-				log_error("Assertion failed: selection is empty:%s\n%s", sel_str.c_str(), desc.c_str());
+				std::string desc = describe_selection_for_assert(design, sel, true);
+				log_error("Assertion failed: selection is empty:%s\n%s", sel_str, desc);
 			}
 			return;
 		}
 
-		if (assert_count >= 0 || assert_max >= 0 || assert_min >= 0)
+		if (assert_modcount >= 0 || assert_count >= 0 || assert_max >= 0 || assert_min >= 0)
 		{
-			int total_count = 0;
+			int module_count = 0, total_count = 0;
 			if (work_stack.size() == 0)
 				log_cmd_error("No selection to check.\n");
 			RTLIL::Selection *sel = &work_stack.back();
+			design->push_selection(*sel);
 			sel->optimize(design);
-			for (auto mod_it : design->modules_)
-				if (sel->selected_module(mod_it.first)) {
-					for (auto &it : mod_it.second->wires_)
-						if (sel->selected_member(mod_it.first, it.first))
-							total_count++;
-					for (auto &it : mod_it.second->memories)
-						if (sel->selected_member(mod_it.first, it.first))
-							total_count++;
-					for (auto &it : mod_it.second->cells_)
-						if (sel->selected_member(mod_it.first, it.first))
-							total_count++;
-					for (auto &it : mod_it.second->processes)
-						if (sel->selected_member(mod_it.first, it.first))
-							total_count++;
-				}
+			for (auto mod : design->all_selected_modules()) {
+				module_count++;
+				for ([[maybe_unused]] auto member_name : mod->selected_members())
+					total_count++;
+			}
+			if (assert_modcount >= 0 && assert_modcount != module_count)
+			{
+				log_error("Assertion failed: selection contains %d modules instead of the asserted %d:%s\n",
+						module_count, assert_modcount, sel_str.c_str());
+			}
 			if (assert_count >= 0 && assert_count != total_count)
 			{
 				std::string desc = describe_selection_for_assert(design, sel);
@@ -1481,20 +1629,28 @@ struct SelectPass : public Pass {
 				log_error("Assertion failed: selection contains %d elements, less than the minimum number %d:%s\n%s",
 						total_count, assert_min, sel_str.c_str(), desc.c_str());
 			}
+			design->pop_selection();
 			return;
 		}
 
 		if (!set_name.empty())
 		{
 			if (work_stack.size() == 0)
-				design->selection_vars[set_name] = RTLIL::Selection(false);
+				design->selection_vars[set_name] = RTLIL::Selection::EmptySelection(design);
 			else
 				design->selection_vars[set_name] = work_stack.back();
 			return;
 		}
 
+		if (!unset_name.empty())
+		{
+			if (!design->selection_vars.erase(unset_name))
+				log_error("Selection '%s' does not exist!\n", unset_name);
+			return;
+		}
+
 		if (work_stack.size() == 0) {
-			RTLIL::Selection &sel = design->selection_stack.back();
+			RTLIL::Selection &sel = design->selection();
 			if (sel.full_selection)
 				log("*\n");
 			for (auto &it : sel.selected_modules)
@@ -1505,14 +1661,19 @@ struct SelectPass : public Pass {
 			return;
 		}
 
-		design->selection_stack.back() = work_stack.back();
-		design->selection_stack.back().optimize(design);
+		design->selection() = work_stack.back();
+		design->selection().optimize(design);
 	}
 } SelectPass;
 
 struct CdPass : public Pass {
 	CdPass() : Pass("cd", "a shortcut for 'select -module <name>'") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -1527,24 +1688,27 @@ struct CdPass : public Pass {
 		log("with the specified name in the current module, then this is equivalent\n");
 		log("to 'cd <celltype>'.\n");
 		log("\n");
+		log("\n");
 		log("    cd ..\n");
 		log("\n");
 		log("Remove trailing substrings that start with '.' in current module name until\n");
 		log("the name of a module in the current design is generated, then switch to that\n");
 		log("module. Otherwise clear the current selection.\n");
 		log("\n");
+		log("\n");
 		log("    cd\n");
 		log("\n");
 		log("This is just a shortcut for 'select -clear'.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		if (args.size() != 1 && args.size() != 2)
 			log_cmd_error("Invalid number of arguments.\n");
 
 		if (args.size() == 1 || args[1] == "/") {
-			design->selection_stack.back() = RTLIL::Selection(true);
+			design->pop_selection();
+			design->push_full_selection();
 			design->selected_active_module = std::string();
 			return;
 		}
@@ -1553,7 +1717,8 @@ struct CdPass : public Pass {
 		{
 			string modname = design->selected_active_module;
 
-			design->selection_stack.back() = RTLIL::Selection(true);
+			design->pop_selection();
+			design->push_full_selection();
 			design->selected_active_module = std::string();
 
 			while (1)
@@ -1570,9 +1735,10 @@ struct CdPass : public Pass {
 					continue;
 
 				design->selected_active_module = modname;
-				design->selection_stack.back() = RTLIL::Selection();
-				select_filter_active_mod(design, design->selection_stack.back());
-				design->selection_stack.back().optimize(design);
+				design->pop_selection();
+				design->push_full_selection();
+				select_filter_active_mod(design, design->selection());
+				design->selection().optimize(design);
 				return;
 			}
 
@@ -1581,28 +1747,27 @@ struct CdPass : public Pass {
 
 		std::string modname = RTLIL::escape_id(args[1]);
 
-		if (design->modules_.count(modname) == 0 && !design->selected_active_module.empty()) {
-			RTLIL::Module *module = NULL;
-			if (design->modules_.count(design->selected_active_module) > 0)
-				module = design->modules_.at(design->selected_active_module);
-			if (module != NULL && module->cells_.count(modname) > 0)
-				modname = module->cells_.at(modname)->type.str();
+		if (design->module(modname) == nullptr && !design->selected_active_module.empty()) {
+			RTLIL::Module *module = design->module(design->selected_active_module);
+			if (module != nullptr && module->cell(modname) != nullptr)
+				modname = module->cell(modname)->type.str();
 		}
 
-		if (design->modules_.count(modname) > 0) {
+		if (design->module(modname) != nullptr) {
 			design->selected_active_module = modname;
-			design->selection_stack.back() = RTLIL::Selection();
-			select_filter_active_mod(design, design->selection_stack.back());
-			design->selection_stack.back().optimize(design);
+			design->pop_selection();
+			design->push_full_selection();
+			select_filter_active_mod(design, design->selection());
+			design->selection().optimize(design);
 			return;
 		}
 
-		log_cmd_error("No such module `%s' found!\n", RTLIL::unescape_id(modname).c_str());
+		log_cmd_error("No such module `%s' found!\n", RTLIL::unescape_id(modname));
 	}
 } CdPass;
 
 template<typename T>
-static void log_matches(const char *title, Module *module, T list)
+static void log_matches(const char *title, Module *module, const T &list)
 {
 	std::vector<IdString> matches;
 
@@ -1620,7 +1785,12 @@ static void log_matches(const char *title, Module *module, T list)
 
 struct LsPass : public Pass {
 	LsPass() : Pass("ls", "list modules or objects in modules") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -1631,7 +1801,7 @@ struct LsPass : public Pass {
 		log("When an active module is selected, this prints a list of objects in the module.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		size_t argidx = 1;
 		extra_args(args, argidx, design);
@@ -1640,7 +1810,7 @@ struct LsPass : public Pass {
 		{
 			std::vector<IdString> matches;
 
-			for (auto mod : design->selected_modules())
+			for (auto mod : design->all_selected_modules())
 				matches.push_back(mod->name);
 
 			if (!matches.empty()) {

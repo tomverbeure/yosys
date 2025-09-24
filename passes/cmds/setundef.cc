@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -20,6 +20,7 @@
 #include "kernel/register.h"
 #include "kernel/celltypes.h"
 #include "kernel/sigtools.h"
+#include "kernel/mem.h"
 #include "kernel/rtlil.h"
 #include "kernel/log.h"
 
@@ -40,7 +41,7 @@ static RTLIL::Wire * add_wire(RTLIL::Module *module, std::string name, int width
 
 	if (module->count_id(name) != 0)
 	{
-		log("Module %s already has such an object %s.\n", module->name.c_str(), name.c_str());
+		log("Module %s already has such an object %s.\n", module->name, name);
 		name += "$";
 		return add_wire(module, name, width, flag_input, flag_output);
 	}
@@ -55,7 +56,7 @@ static RTLIL::Wire * add_wire(RTLIL::Module *module, std::string name, int width
 			module->fixup_ports();
 		}
 
-		log("Added wire %s to module %s.\n", name.c_str(), module->name.c_str());
+		log("Added wire %s to module %s.\n", name, module->name);
 	}
 
 	return wire;
@@ -107,7 +108,7 @@ struct SetundefWorker
 
 struct SetundefPass : public Pass {
 	SetundefPass() : Pass("setundef", "replace undef values with defined constants") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -147,9 +148,9 @@ struct SetundefPass : public Pass {
 		log("        replace undef in cell parameters\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		bool got_value = false;
+		int got_value = 0;
 		bool undriven_mode = false;
 		bool expose_mode = false;
 		bool init_mode = false;
@@ -170,31 +171,31 @@ struct SetundefPass : public Pass {
 				continue;
 			}
 			if (args[argidx] == "-zero") {
-				got_value = true;
+				got_value++;
 				worker.next_bit_mode = MODE_ZERO;
 				worker.next_bit_state = 0;
 				continue;
 			}
 			if (args[argidx] == "-one") {
-				got_value = true;
+				got_value++;
 				worker.next_bit_mode = MODE_ONE;
 				worker.next_bit_state = 0;
 				continue;
 			}
 			if (args[argidx] == "-anyseq") {
-				got_value = true;
+				got_value++;
 				worker.next_bit_mode = MODE_ANYSEQ;
 				worker.next_bit_state = 0;
 				continue;
 			}
 			if (args[argidx] == "-anyconst") {
-				got_value = true;
+				got_value++;
 				worker.next_bit_mode = MODE_ANYCONST;
 				worker.next_bit_state = 0;
 				continue;
 			}
 			if (args[argidx] == "-undef") {
-				got_value = true;
+				got_value++;
 				worker.next_bit_mode = MODE_UNDEF;
 				worker.next_bit_state = 0;
 				continue;
@@ -207,8 +208,8 @@ struct SetundefPass : public Pass {
 				params_mode = true;
 				continue;
 			}
-			if (args[argidx] == "-random" && !got_value && argidx+1 < args.size()) {
-				got_value = true;
+			if (args[argidx] == "-random" && argidx+1 < args.size()) {
+				got_value++;
 				worker.next_bit_mode = MODE_RANDOM;
 				worker.next_bit_state = atoi(args[++argidx].c_str()) + 1;
 				for (int i = 0; i < 10; i++)
@@ -221,7 +222,7 @@ struct SetundefPass : public Pass {
 
 		if (!got_value && expose_mode) {
 			log("Using default as -undef with -expose.\n");
-			got_value = true;
+			got_value++;
 			worker.next_bit_mode = MODE_UNDEF;
 			worker.next_bit_state = 0;
 		}
@@ -229,7 +230,9 @@ struct SetundefPass : public Pass {
 		if (expose_mode && !undriven_mode)
 			log_cmd_error("Option -expose must be used with option -undriven.\n");
 		if (!got_value)
-			log_cmd_error("One of the options -zero, -one, -anyseq, -anyconst, or -random <seed> must be specified.\n");
+			log_cmd_error("One of the options -zero, -one, -anyseq, -anyconst, -random <seed>, or -expose must be specified.\n");
+		else if (got_value > 1)
+			log_cmd_error("Only one of the options -zero, -one, -anyseq, -anyconst, or -random <seed> can be specified.\n");
 
 		if (init_mode && (worker.next_bit_mode == MODE_ANYSEQ || worker.next_bit_mode == MODE_ANYCONST))
 			log_cmd_error("The options -init and -anyseq / -anyconst are exclusive.\n");
@@ -240,7 +243,7 @@ struct SetundefPass : public Pass {
 			{
 				for (auto *cell : module->selected_cells()) {
 					for (auto &parameter : cell->parameters) {
-						for (auto &bit : parameter.second.bits) {
+						for (auto bit : parameter.second) {
 							if (bit > RTLIL::State::S1)
 								bit = worker.next_bit();
 						}
@@ -316,7 +319,7 @@ struct SetundefPass : public Pass {
 							wire = add_wire(module, name, c.width, true, false);
 							module->connect(RTLIL::SigSig(c, wire));
 						}
-						log("Exposing undriven wire %s as input.\n", wire->name.c_str());
+						log("Exposing undriven wire %s as input.\n", wire->name);
 					}
 					module->fixup_ports();
 				}
@@ -359,81 +362,155 @@ struct SetundefPass : public Pass {
 				pool<SigBit> ffbits;
 				pool<Wire*> initwires;
 
-				pool<IdString> fftypes;
-				fftypes.insert("$dff");
-				fftypes.insert("$dffe");
-				fftypes.insert("$dffsr");
-				fftypes.insert("$adff");
-
-				std::vector<char> list_np = {'N', 'P'}, list_01 = {'0', '1'};
-
-				for (auto c1 : list_np)
-					fftypes.insert(stringf("$_DFF_%c_", c1));
-
-				for (auto c1 : list_np)
-				for (auto c2 : list_np)
-					fftypes.insert(stringf("$_DFFE_%c%c_", c1, c2));
-
-				for (auto c1 : list_np)
-				for (auto c2 : list_np)
-				for (auto c3 : list_01)
-					fftypes.insert(stringf("$_DFF_%c%c%c_", c1, c2, c3));
-
-				for (auto c1 : list_np)
-				for (auto c2 : list_np)
-				for (auto c3 : list_np)
-					fftypes.insert(stringf("$_DFFSR_%c%c%c_", c1, c2, c3));
-
 				for (auto cell : module->cells())
 				{
-					if (!fftypes.count(cell->type))
+					if (!cell->is_builtin_ff())
 						continue;
 
-					for (auto bit : sigmap(cell->getPort("\\Q")))
+					for (auto bit : sigmap(cell->getPort(ID::Q)))
 						ffbits.insert(bit);
 				}
 
-				for (auto wire : module->wires())
+				auto process_initwires = [&]()
 				{
-					if (!wire->attributes.count("\\init"))
-						continue;
+					dict<Wire*, int> wire_weights;
 
-					for (auto bit : sigmap(wire))
-						ffbits.erase(bit);
-
-					initwires.insert(wire);
-				}
-
-				for (int wire_types = 0; wire_types < 2; wire_types++)
-					for (auto wire : module->wires())
+					for (auto wire : initwires)
 					{
-						if (wire->name[0] == (wire_types ? '\\' : '$'))
-					next_wire:
-							continue;
+						int weight = 0;
 
 						for (auto bit : sigmap(wire))
-							if (!ffbits.count(bit))
-								goto next_wire;
+							weight += ffbits.count(bit) ? +1 : -1;
 
-						for (auto bit : sigmap(wire))
-							ffbits.erase(bit);
-
-						initwires.insert(wire);
+						wire_weights[wire] = weight;
 					}
 
-				for (auto wire : initwires)
-				{
-					Const &initval = wire->attributes["\\init"];
+					initwires.sort([&](Wire *a, Wire *b) { return wire_weights.at(a) > wire_weights.at(b); });
 
-					for (int i = 0; i < GetSize(wire); i++)
-						if (GetSize(initval) <= i)
-							initval.bits.push_back(worker.next_bit());
-						else if (initval.bits[i] == State::Sx)
-							initval.bits[i] = worker.next_bit();
+					for (auto wire : initwires)
+					{
+						Const &initval = wire->attributes[ID::init];
+						initval.resize(GetSize(wire), State::Sx);
+
+						for (int i = 0; i < GetSize(wire); i++) {
+							SigBit bit = sigmap(SigBit(wire, i));
+							if (initval[i] == State::Sx && ffbits.count(bit)) {
+								initval.set(i, worker.next_bit());
+								ffbits.erase(bit);
+							}
+						}
+
+						if (initval.is_fully_undef())
+							wire->attributes.erase(ID::init);
+					}
+
+					initwires.clear();
+				};
+
+				for (int wire_types = 0; wire_types < 2; wire_types++)
+				{
+					// prioritize wires that already have an init attribute
+					if (!ffbits.empty())
+					{
+						for (auto wire : module->wires())
+						{
+							if (wire->name[0] == (wire_types ? '\\' : '$'))
+								continue;
+
+							if (!wire->attributes.count(ID::init))
+								continue;
+
+							Const &initval = wire->attributes[ID::init];
+							initval.resize(GetSize(wire), State::Sx);
+
+							if (initval.is_fully_undef()) {
+								wire->attributes.erase(ID::init);
+								continue;
+							}
+
+							for (int i = 0; i < GetSize(wire); i++)
+								if (initval[i] != State::Sx)
+									ffbits.erase(sigmap(SigBit(wire, i)));
+
+							initwires.insert(wire);
+						}
+
+						process_initwires();
+					}
+
+					// next consider wires that completely contain bits to be initialized
+					if (!ffbits.empty())
+					{
+						for (auto wire : module->wires())
+						{
+							if (wire->name[0] == (wire_types ? '\\' : '$'))
+								continue;
+
+							for (auto bit : sigmap(wire))
+								if (!ffbits.count(bit))
+									goto next_wire;
+
+							initwires.insert(wire);
+
+						next_wire:
+							continue;
+						}
+
+						process_initwires();
+					}
+
+					// finally use whatever wire we can find.
+					if (!ffbits.empty())
+					{
+						for (auto wire : module->wires())
+						{
+							if (wire->name[0] == (wire_types ? '\\' : '$'))
+								continue;
+
+							for (auto bit : sigmap(wire))
+								if (ffbits.count(bit))
+									initwires.insert(wire);
+						}
+
+						process_initwires();
+					}
+				}
+
+				log_assert(ffbits.empty());
+			}
+
+			if (worker.next_bit_mode == MODE_ANYSEQ || worker.next_bit_mode == MODE_ANYCONST)
+			{
+				// Do not add anyseq / anyconst to unused memory port clocks
+				std::vector<Mem> memories = Mem::get_selected_memories(module);
+				for (auto &mem : memories) {
+					bool changed = false;
+					for (auto &rd_port : mem.rd_ports) {
+						if (!rd_port.clk_enable && rd_port.clk.is_fully_undef()) {
+							changed = true;
+							rd_port.clk = State::S0;
+						}
+					}
+					for (auto &wr_port : mem.rd_ports) {
+						if (!wr_port.clk_enable && wr_port.clk.is_fully_undef()) {
+							changed = true;
+							wr_port.clk = State::S0;
+						}
+					}
+					if (changed)
+						mem.emit();
 				}
 			}
 
-			module->rewrite_sigspecs(worker);
+			for (auto &it : module->cells_)
+				if (!it.second->get_bool_attribute(ID::xprop_decoder))
+					it.second->rewrite_sigspecs(worker);
+			for (auto &it : module->processes)
+				it.second->rewrite_sigspecs(worker);
+			for (auto &it : module->connections_) {
+				worker(it.first);
+				worker(it.second);
+			}
 
 			if (worker.next_bit_mode == MODE_ANYSEQ || worker.next_bit_mode == MODE_ANYCONST)
 			{

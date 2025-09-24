@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -33,87 +33,72 @@ struct FsmData
 
 	void copy_to_cell(RTLIL::Cell *cell)
 	{
-		cell->parameters["\\CTRL_IN_WIDTH"] = RTLIL::Const(num_inputs);
-		cell->parameters["\\CTRL_OUT_WIDTH"] = RTLIL::Const(num_outputs);
+		cell->parameters[ID::CTRL_IN_WIDTH] = RTLIL::Const(num_inputs);
+		cell->parameters[ID::CTRL_OUT_WIDTH] = RTLIL::Const(num_outputs);
 
 		int state_num_log2 = 0;
 		for (int i = state_table.size(); i > 0; i = i >> 1)
 			state_num_log2++;
 		state_num_log2 = max(state_num_log2, 1);
 
-		cell->parameters["\\STATE_BITS"] = RTLIL::Const(state_bits);
-		cell->parameters["\\STATE_NUM"] = RTLIL::Const(state_table.size());
-		cell->parameters["\\STATE_NUM_LOG2"] = RTLIL::Const(state_num_log2);
-		cell->parameters["\\STATE_RST"] = RTLIL::Const(reset_state);
-		cell->parameters["\\STATE_TABLE"] = RTLIL::Const();
+		cell->parameters[ID::STATE_BITS] = RTLIL::Const(state_bits);
+		cell->parameters[ID::STATE_NUM] = RTLIL::Const(state_table.size());
+		cell->parameters[ID::STATE_NUM_LOG2] = RTLIL::Const(state_num_log2);
+		cell->parameters[ID::STATE_RST] = RTLIL::Const(reset_state);
+		RTLIL::Const cell_state_table;
+		for (const RTLIL::Const &c : state_table)
+			cell_state_table.append(c);
+		cell->parameters[ID::STATE_TABLE] = std::move(cell_state_table);
 
-		for (int i = 0; i < int(state_table.size()); i++) {
-			std::vector<RTLIL::State> &bits_table = cell->parameters["\\STATE_TABLE"].bits;
-			std::vector<RTLIL::State> &bits_state = state_table[i].bits;
-			bits_table.insert(bits_table.end(), bits_state.begin(), bits_state.end());
-		}
-
-		cell->parameters["\\TRANS_NUM"] = RTLIL::Const(transition_table.size());
-		cell->parameters["\\TRANS_TABLE"] = RTLIL::Const();
+		cell->parameters[ID::TRANS_NUM] = RTLIL::Const(transition_table.size());
+		RTLIL::Const cell_trans_table;
 		for (int i = 0; i < int(transition_table.size()); i++)
 		{
-			std::vector<RTLIL::State> &bits_table = cell->parameters["\\TRANS_TABLE"].bits;
 			transition_t &tr = transition_table[i];
 
 			RTLIL::Const const_state_in = RTLIL::Const(tr.state_in, state_num_log2);
 			RTLIL::Const const_state_out = RTLIL::Const(tr.state_out, state_num_log2);
-			std::vector<RTLIL::State> &bits_state_in = const_state_in.bits;
-			std::vector<RTLIL::State> &bits_state_out = const_state_out.bits;
-
-			std::vector<RTLIL::State> &bits_ctrl_in = tr.ctrl_in.bits;
-			std::vector<RTLIL::State> &bits_ctrl_out = tr.ctrl_out.bits;
 
 			// append lsb first
-			bits_table.insert(bits_table.end(), bits_ctrl_out.begin(), bits_ctrl_out.end());
-			bits_table.insert(bits_table.end(), bits_state_out.begin(), bits_state_out.end());
-			bits_table.insert(bits_table.end(), bits_ctrl_in.begin(), bits_ctrl_in.end());
-			bits_table.insert(bits_table.end(), bits_state_in.begin(), bits_state_in.end());
+			cell_trans_table.append(tr.ctrl_out);
+			cell_trans_table.append(const_state_out);
+			cell_trans_table.append(tr.ctrl_in);
+			cell_trans_table.append(const_state_in);
 		}
+		cell->parameters[ID::TRANS_TABLE] = std::move(cell_trans_table);
 	}
 
 	void copy_from_cell(RTLIL::Cell *cell)
 	{
-		num_inputs = cell->parameters["\\CTRL_IN_WIDTH"].as_int();
-		num_outputs = cell->parameters["\\CTRL_OUT_WIDTH"].as_int();
+		num_inputs = cell->parameters[ID::CTRL_IN_WIDTH].as_int();
+		num_outputs = cell->parameters[ID::CTRL_OUT_WIDTH].as_int();
 
-		state_bits = cell->parameters["\\STATE_BITS"].as_int();
-		reset_state = cell->parameters["\\STATE_RST"].as_int();
+		state_bits = cell->parameters[ID::STATE_BITS].as_int();
+		reset_state = cell->parameters[ID::STATE_RST].as_int();
 
-		int state_num = cell->parameters["\\STATE_NUM"].as_int();
-		int state_num_log2 = cell->parameters["\\STATE_NUM_LOG2"].as_int();
-		int trans_num = cell->parameters["\\TRANS_NUM"].as_int();
+		int state_num = cell->parameters[ID::STATE_NUM].as_int();
+		int state_num_log2 = cell->parameters[ID::STATE_NUM_LOG2].as_int();
+		int trans_num = cell->parameters[ID::TRANS_NUM].as_int();
 
 		if (reset_state < 0 || reset_state >= state_num)
 			reset_state = -1;
 
-		RTLIL::Const state_table = cell->parameters["\\STATE_TABLE"];
-		RTLIL::Const trans_table = cell->parameters["\\TRANS_TABLE"];
+		const RTLIL::Const &state_table = cell->parameters[ID::STATE_TABLE];
+		const RTLIL::Const &trans_table = cell->parameters[ID::TRANS_TABLE];
 
 		for (int i = 0; i < state_num; i++) {
-			RTLIL::Const state_code;
-			int off_begin = i*state_bits, off_end = off_begin + state_bits;
-			state_code.bits.insert(state_code.bits.begin(), state_table.bits.begin()+off_begin, state_table.bits.begin()+off_end);
+			int off_begin = i*state_bits;
+			RTLIL::Const state_code = state_table.extract(off_begin, state_bits);
 			this->state_table.push_back(state_code);
 		}
 
 		for (int i = 0; i < trans_num; i++)
 		{
-			auto off_ctrl_out = trans_table.bits.begin() + i*(num_inputs+num_outputs+2*state_num_log2);
-			auto off_state_out = off_ctrl_out + num_outputs;
-			auto off_ctrl_in = off_state_out + state_num_log2;
-			auto off_state_in = off_ctrl_in + num_inputs;
-			auto off_end = off_state_in + state_num_log2;
-
-			RTLIL::Const state_in, state_out, ctrl_in, ctrl_out;
-			ctrl_out.bits.insert(state_in.bits.begin(), off_ctrl_out, off_state_out);
-			state_out.bits.insert(state_out.bits.begin(), off_state_out, off_ctrl_in);
-			ctrl_in.bits.insert(ctrl_in.bits.begin(), off_ctrl_in, off_state_in);
-			state_in.bits.insert(state_in.bits.begin(), off_state_in, off_end);
+			int base_offset = i*(num_inputs+num_outputs+2*state_num_log2);
+			RTLIL::Const ctrl_out = trans_table.extract(base_offset, num_outputs);
+			RTLIL::Const state_out = trans_table.extract(base_offset + num_outputs, state_num_log2);
+			RTLIL::Const ctrl_in = trans_table.extract(base_offset + num_outputs + state_num_log2, num_inputs);
+			RTLIL::Const state_in = trans_table.extract(base_offset + num_outputs + state_num_log2 + num_inputs, state_num_log2);
 
 			transition_t tr;
 			tr.state_in = state_in.as_int();
@@ -134,7 +119,7 @@ struct FsmData
 	{
 		log("-------------------------------------\n");
 		log("\n");
-		log("  Information on FSM %s (%s):\n", cell->name.c_str(), cell->parameters["\\NAME"].decode_string().c_str());
+		log("  Information on FSM %s (%s):\n", cell->name, cell->parameters[ID::NAME].decode_string());
 		log("\n");
 		log("  Number of input signals:  %3d\n", num_inputs);
 		log("  Number of output signals: %3d\n", num_outputs);
@@ -142,13 +127,13 @@ struct FsmData
 
 		log("\n");
 		log("  Input signals:\n");
-		RTLIL::SigSpec sig_in = cell->getPort("\\CTRL_IN");
+		RTLIL::SigSpec sig_in = cell->getPort(ID::CTRL_IN);
 		for (int i = 0; i < GetSize(sig_in); i++)
 			log("  %3d: %s\n", i, log_signal(sig_in[i]));
 
 		log("\n");
 		log("  Output signals:\n");
-		RTLIL::SigSpec sig_out = cell->getPort("\\CTRL_OUT");
+		RTLIL::SigSpec sig_out = cell->getPort(ID::CTRL_OUT);
 		for (int i = 0; i < GetSize(sig_out); i++)
 			log("  %3d: %s\n", i, log_signal(sig_out[i]));
 

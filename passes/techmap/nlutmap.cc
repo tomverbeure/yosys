@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -42,7 +42,7 @@ struct NlutmapWorker
 
 	RTLIL::Selection get_selection()
 	{
-		RTLIL::Selection sel(false);
+		auto sel = RTLIL::Selection::EmptySelection(module->design);
 		for (auto cell : module->cells())
 			if (!mapped_cells.count(cell))
 				sel.select(module, cell);
@@ -82,10 +82,10 @@ struct NlutmapWorker
 
 			for (auto cell : module->cells())
 			{
-				if (cell->type != "$lut" || mapped_cells.count(cell))
+				if (cell->type != ID($lut) || mapped_cells.count(cell))
 					continue;
 
-				if (GetSize(cell->getPort("\\A")) == lut_size || lut_size == 2)
+				if (GetSize(cell->getPort(ID::A)) == lut_size || lut_size == 2)
 					candidate_ratings[cell] = 0;
 
 				for (auto &conn : cell->connections())
@@ -119,7 +119,7 @@ struct NlutmapWorker
 
 		if (config.assert_mode) {
 			for (auto cell : module->cells())
-				if (cell->type == "$lut" && !mapped_cells.count(cell))
+				if (cell->type == ID($lut) && !mapped_cells.count(cell))
 					log_error("Insufficient number of LUTs to map all logic cells!\n");
 		}
 
@@ -129,7 +129,7 @@ struct NlutmapWorker
 
 struct NlutmapPass : public Pass {
 	NlutmapPass() : Pass("nlutmap", "map to LUTs of different sizes") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -149,7 +149,7 @@ struct NlutmapPass : public Pass {
 		log("to generic logic gates ($_AND_, etc.).\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		NlutmapConfig config;
 

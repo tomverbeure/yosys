@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -26,36 +26,17 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-void proc_get_const(RTLIL::SigSpec &sig, RTLIL::CaseRule &rule)
+void proc_init(RTLIL::Module *mod, SigMap &sigmap, RTLIL::Process *proc)
 {
-	log_assert(rule.compare.size() == 0);
-
-	while (1) {
-		RTLIL::SigSpec tmp = sig;
-		for (auto &it : rule.actions)
-			tmp.replace(it.first, it.second);
-		if (tmp == sig)
-			break;
-		sig = tmp;
-	}
-}
-
-void proc_init(RTLIL::Module *mod, RTLIL::Process *proc)
-{
-	bool found_init = false;
-
 	for (auto &sync : proc->syncs)
 		if (sync->type == RTLIL::SyncType::STi)
 		{
-			found_init = true;
-			log("Found init rule in `%s.%s'.\n", mod->name.c_str(), proc->name.c_str());
+			log("Found init rule in `%s.%s'.\n", mod->name, proc->name);
 
 			for (auto &action : sync->actions)
 			{
 				RTLIL::SigSpec lhs = action.first;
-				RTLIL::SigSpec rhs = action.second;
-
-				proc_get_const(rhs, proc->root_case);
+				RTLIL::SigSpec rhs = sigmap(action.second);
 
 				if (!rhs.is_fully_const())
 					log_cmd_error("Failed to get a constant init value for %s: %s\n", log_signal(lhs), log_signal(rhs));
@@ -70,39 +51,28 @@ void proc_init(RTLIL::Module *mod, RTLIL::Process *proc)
 							log_cmd_error("Non-const initialization value: %s = %s\n", log_signal(lhs_c), log_signal(valuesig));
 
 						Const value = valuesig.as_const();
-						Const &wireinit = lhs_c.wire->attributes["\\init"];
-
-						while (GetSize(wireinit.bits) < lhs_c.wire->width)
-							wireinit.bits.push_back(State::Sx);
-
+						Const &wireinit = lhs_c.wire->attributes[ID::init];
+						if (GetSize(wireinit) < lhs_c.wire->width)
+							wireinit.resize(lhs_c.wire->width, State::Sx);
 						for (int i = 0; i < lhs_c.width; i++) {
-							auto &initbit = wireinit.bits[i + lhs_c.offset];
+							int index = i + lhs_c.offset;
+							State initbit = wireinit[index];
 							if (initbit != State::Sx && initbit != value[i])
 								log_cmd_error("Conflicting initialization values for %s.\n", log_signal(lhs_c));
-							initbit = value[i];
+							wireinit.set(index, value[i]);
 						}
-
 						log("  Set init value: %s = %s\n", log_signal(lhs_c.wire), log_signal(wireinit));
 					}
 					offset += lhs_c.width;
 				}
 			}
+			sync->actions.clear();
 		}
-
-	if (found_init) {
-		std::vector<RTLIL::SyncRule*> new_syncs;
-		for (auto &sync : proc->syncs)
-			if (sync->type == RTLIL::SyncType::STi)
-				delete sync;
-			else
-				new_syncs.push_back(sync);
-		proc->syncs.swap(new_syncs);
-	}
 }
 
 struct ProcInitPass : public Pass {
 	ProcInitPass() : Pass("proc_init", "convert initial block to init attributes") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -113,17 +83,17 @@ struct ProcInitPass : public Pass {
 		log("respective wire.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing PROC_INIT pass (extract init attributes).\n");
 
 		extra_args(args, 1, design);
 
-		for (auto mod : design->modules())
-			if (design->selected(mod))
-				for (auto &proc_it : mod->processes)
-					if (design->selected(mod, proc_it.second))
-						proc_init(mod, proc_it.second);
+		for (auto mod : design->all_selected_modules()) {
+			SigMap sigmap(mod);
+			for (auto proc : mod->selected_processes())
+				proc_init(mod, sigmap, proc);
+		}
 	}
 } ProcInitPass;
 

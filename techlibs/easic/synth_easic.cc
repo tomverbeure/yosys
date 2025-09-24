@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -29,7 +29,7 @@ struct SynthEasicPass : public ScriptPass
 {
 	SynthEasicPass() : ScriptPass("synth_easic", "synthesis for eASIC platform") { }
 
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -56,7 +56,7 @@ struct SynthEasicPass : public ScriptPass
 		log("        do not flatten design before synthesis\n");
 		log("\n");
 		log("    -retime\n");
-		log("        run 'abc' with -dff option\n");
+		log("        run 'abc' with '-dff -D 1' options\n");
 		log("\n");
 		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
@@ -67,7 +67,7 @@ struct SynthEasicPass : public ScriptPass
 	string top_opt, vlog_file, etools_path;
 	bool flatten, retime;
 
-	void clear_flags() YS_OVERRIDE
+	void clear_flags() override
 	{
 		top_opt = "-auto-top";
 		vlog_file = "";
@@ -76,7 +76,7 @@ struct SynthEasicPass : public ScriptPass
 		retime = false;
 	}
 
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		string run_from, run_to;
 		clear_flags();
@@ -127,16 +127,16 @@ struct SynthEasicPass : public ScriptPass
 		log_pop();
 	}
 
-	void script() YS_OVERRIDE
+	void script() override
 	{
-		string phys_clk_lib = stringf("%s/data_ruby28/design_libs/logical/timing/gp/n3x_phys_clk_0v893ff125c.lib", etools_path.c_str());
-		string logic_lut_lib = stringf("%s/data_ruby28/design_libs/logical/timing/gp/n3x_logic_lut_0v893ff125c.lib", etools_path.c_str());
+		string phys_clk_lib = stringf("%s/data_ruby28/design_libs/logical/timing/gp/n3x_phys_clk_0v893ff125c.lib", etools_path);
+		string logic_lut_lib = stringf("%s/data_ruby28/design_libs/logical/timing/gp/n3x_logic_lut_0v893ff125c.lib", etools_path);
 
 		if (check_label("begin"))
 		{
-			run(stringf("read_liberty -lib %s", help_mode ? "<etools_phys_clk_lib>" : phys_clk_lib.c_str()));
-			run(stringf("read_liberty -lib %s", help_mode ? "<etools_logic_lut_lib>" : logic_lut_lib.c_str()));
-			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt.c_str()));
+			run(stringf("read_liberty -lib %s", help_mode ? "<etools_phys_clk_lib>" : phys_clk_lib));
+			run(stringf("read_liberty -lib %s", help_mode ? "<etools_logic_lut_lib>" : logic_lut_lib));
+			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
 		}
 
 		if (flatten && check_label("flatten", "(unless -noflatten)"))
@@ -158,15 +158,15 @@ struct SynthEasicPass : public ScriptPass
 			run("techmap");
 			run("opt -fast");
 			if (retime || help_mode) {
-				run("abc -dff", " (only if -retime)");
+				run("abc -dff -D 1", " (only if -retime)");
 				run("opt_clean", "(only if -retime)");
 			}
 		}
 
 		if (check_label("map"))
 		{
-			run(stringf("dfflibmap -liberty %s", help_mode ? "<etools_phys_clk_lib>" : phys_clk_lib.c_str()));
-			run(stringf("abc -liberty %s", help_mode ? "<etools_logic_lut_lib>" : logic_lut_lib.c_str()));
+			run(stringf("dfflibmap -liberty %s", help_mode ? "<etools_phys_clk_lib>" : phys_clk_lib));
+			run(stringf("abc -liberty %s", help_mode ? "<etools_logic_lut_lib>" : logic_lut_lib));
 			run("opt_clean");
 		}
 
@@ -175,12 +175,13 @@ struct SynthEasicPass : public ScriptPass
 			run("hierarchy -check");
 			run("stat");
 			run("check -noinit");
+			run("blackbox =A:whitebox");
 		}
 
 		if (check_label("vlog"))
 		{
 			if (!vlog_file.empty() || help_mode)
-				run(stringf("write_verilog -noexpr -attr2comment %s", help_mode ? "<file-name>" : vlog_file.c_str()));
+				run(stringf("write_verilog -noexpr -attr2comment %s", help_mode ? "<file-name>" : vlog_file));
 		}
 	}
 } SynthEasicPass;

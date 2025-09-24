@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -ex
+set -e
 
 prefix=${1%.ok}
 prefix=${prefix%.sv}
@@ -22,18 +22,17 @@ generate_sby() {
 
 	if [ -f $prefix.sv ]; then
 		if [ "$1" = "fail" ]; then
-			echo "verific -sv ${prefix}_fail.sv"
+			echo "read -sv ${prefix}_fail.sv"
 		else
-			echo "verific -sv $prefix.sv"
+			echo "read -sv $prefix.sv"
 		fi
 	fi
 
 	if [ -f $prefix.vhd ]; then
-		echo "verific -vhdl $prefix.vhd"
+		echo "read -vhdl $prefix.vhd"
 	fi
 
 	cat <<- EOT
-		verific -import -extnets -all top
 		prep -top top
 		chformal -early -assume
 
@@ -58,15 +57,34 @@ generate_sby() {
 	fi
 }
 
-if [ -f $prefix.sv ]; then
+if [ -f $prefix.ys ]; then
+	set -x
+	$PWD/../../yosys -q -e "Assert .* failed." -s $prefix.ys
+elif [ -f $prefix.sv ]; then
 	generate_sby pass > ${prefix}_pass.sby
 	generate_sby fail > ${prefix}_fail.sby
-	sby --yosys $PWD/../../yosys -f ${prefix}_pass.sby
-	sby --yosys $PWD/../../yosys -f ${prefix}_fail.sby
+
+	# Check that SBY is up to date enough for this yosys version
+	if sby --help | grep -q -e '--status'; then
+		set -x
+		sby --yosys $PWD/../../yosys -f ${prefix}_pass.sby
+		sby --yosys $PWD/../../yosys -f ${prefix}_fail.sby
+	else
+		echo "sva test '${prefix}' requires an up to date SBY, skipping"
+	fi
 else
 	generate_sby pass > ${prefix}.sby
-	sby --yosys $PWD/../../yosys -f ${prefix}.sby
+
+	# Check that SBY is up to date enough for this yosys version
+	if sby --help | grep -q -e '--status'; then
+		set -x
+		sby --yosys $PWD/../../yosys -f ${prefix}.sby
+	else
+		echo "sva test '${prefix}' requires an up to date SBY, skipping"
+	fi
 fi
+
+{ set +x; } &>/dev/null
 
 touch $prefix.ok
 

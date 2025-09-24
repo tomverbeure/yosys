@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2014  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2014  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2014  Johann Glaser <Johann.Glaser@gmx.at>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -55,7 +55,7 @@ static void test_abcloop()
 
 	while (1)
 	{
-		module = design->addModule("\\uut");
+		module = design->addModule(ID(UUT));
 		create_cycles++;
 
 		in_sig = {};
@@ -132,7 +132,7 @@ static void test_abcloop()
 		SatGen satgen(ez.get(), &sigmap);
 
 		for (auto c : module->cells()) {
-			bool ok YS_ATTRIBUTE(unused) = satgen.importCell(c);
+			bool ok = satgen.importCell(c);
 			log_assert(ok);
 		}
 
@@ -171,7 +171,7 @@ static void test_abcloop()
 	}
 
 	log("Found viable UUT after %d cycles:\n", create_cycles);
-	Pass::call(design, "write_ilang");
+	Pass::call(design, "write_rtlil");
 	Pass::call(design, "abc");
 
 	log("\n");
@@ -182,7 +182,7 @@ static void test_abcloop()
 	SatGen satgen(ez.get(), &sigmap);
 
 	for (auto c : module->cells()) {
-		bool ok YS_ATTRIBUTE(unused) = satgen.importCell(c);
+		bool ok = satgen.importCell(c);
 		log_assert(ok);
 	}
 
@@ -243,8 +243,10 @@ static void test_abcloop()
 }
 
 struct TestAbcloopPass : public Pass {
-	TestAbcloopPass() : Pass("test_abcloop", "automatically test handling of loops in abc command") { }
-	void help() YS_OVERRIDE
+	TestAbcloopPass() : Pass("test_abcloop", "automatically test handling of loops in abc command") {
+		internal();
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -259,7 +261,7 @@ struct TestAbcloopPass : public Pass {
 		log("        use this value as rng seed value (default = unix time).\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design*) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design*) override
 	{
 		int num_iter = 100;
 		xorshift32_state = 0;

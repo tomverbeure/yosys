@@ -1,1 +1,8 @@
-*.log
+/*.sel
+/write_gzip.v
+/write_gzip.v.gz
+/plugin.so
+/plugin.so.dSYM
+/temp
+/smtlib2_module.smt2
+/smtlib2_module-filtered.smt2

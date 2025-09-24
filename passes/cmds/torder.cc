@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -21,13 +21,19 @@
 #include "kernel/celltypes.h"
 #include "kernel/sigtools.h"
 #include "kernel/utils.h"
+#include "kernel/log_help.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 struct TorderPass : public Pass {
 	TorderPass() : Pass("torder", "print cells in topological order") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -43,7 +49,7 @@ struct TorderPass : public Pass {
 		log("        are not used in topological sorting. this option deactivates that.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		bool noautostop = false;
 		dict<IdString, pool<IdString>> stop_db;
@@ -81,9 +87,9 @@ struct TorderPass : public Pass {
 					continue;
 
 				if (!noautostop && yosys_celltypes.cell_known(cell->type)) {
-					if (conn.first.in("\\Q", "\\CTRL_OUT", "\\RD_DATA"))
+					if (conn.first.in(ID::Q, ID::CTRL_OUT, ID::RD_DATA))
 						continue;
-					if (cell->type == "$memrd" && conn.first == "\\DATA")
+					if (cell->type.in(ID($memrd), ID($memrd_v2)) && conn.first == ID::DATA)
 						continue;
 				}
 

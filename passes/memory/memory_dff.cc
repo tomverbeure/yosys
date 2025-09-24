@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -19,294 +19,637 @@
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
+#include "kernel/modtools.h"
+#include "kernel/ffinit.h"
+#include "kernel/qcsat.h"
+#include "kernel/mem.h"
+#include "kernel/ff.h"
+#include "kernel/ffmerge.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+struct MuxData {
+	int base_idx;
+	int size;
+	bool is_b;
+	SigSpec sig_s;
+	std::vector<SigSpec> sig_other;
+};
+
+struct PortData {
+	bool relevant;
+	std::vector<bool> uncollidable_mask;
+	std::vector<bool> transparency_mask;
+	std::vector<bool> collision_x_mask;
+	bool final_transparency;
+	bool final_collision_x;
+};
+
+// A helper with some caching for transparency-related SAT queries.
+// Bound to a single memory read port in the process of being converted
+// from async to sync..
+struct MemQueryCache
+{
+	QuickConeSat &qcsat;
+	// The memory.
+	Mem &mem;
+	// The port, still async at this point.
+	MemRd &port;
+	// The virtual FF that will end up merged into this port.
+	FfData &ff;
+	// An ezSAT variable that is true when we actually care about the data
+	// read from memory (ie. the FF has enable on and is not in reset).
+	int port_ren;
+	// Some caches.
+	dict<std::pair<int, SigBit>, bool> cache_can_collide_rdwr;
+	dict<std::tuple<int, int, SigBit, SigBit>, bool> cache_can_collide_together;
+	dict<std::tuple<int, SigBit, SigBit, bool>, bool> cache_is_w2rbyp;
+	dict<std::tuple<SigBit, bool>, bool> cache_impossible_with_ren;
+
+	MemQueryCache(QuickConeSat &qcsat, Mem &mem, MemRd &port, FfData &ff) : qcsat(qcsat), mem(mem), port(port), ff(ff) {
+		// port_ren is an upper bound on when we care about the value fetched
+		// from memory this cycle.
+		int ren = ezSAT::CONST_TRUE;
+		if (ff.has_ce) {
+			ren = qcsat.importSigBit(ff.sig_ce);
+			if (!ff.pol_ce)
+				ren = qcsat.ez->NOT(ren);
+		}
+		if (ff.has_srst) {
+			int nrst = qcsat.importSigBit(ff.sig_srst);
+			if (ff.pol_srst)
+				nrst = qcsat.ez->NOT(nrst);
+			ren = qcsat.ez->AND(ren, nrst);
+		}
+		port_ren = ren;
+	}
+
+	// Returns ezSAT variable that is true iff the two addresses are the same.
+	int addr_eq(SigSpec raddr, SigSpec waddr) {
+		int abits = std::max(GetSize(raddr), GetSize(waddr));
+		raddr.extend_u0(abits);
+		waddr.extend_u0(abits);
+		return qcsat.ez->vec_eq(qcsat.importSig(raddr), qcsat.importSig(waddr));
+	}
+
+	// Returns true if a given write port bit can be active at the same time
+	// as this read port and at the same address.
+	bool can_collide_rdwr(int widx, SigBit wen) {
+		std::pair<int, SigBit> key(widx, wen);
+		auto it = cache_can_collide_rdwr.find(key);
+		if (it != cache_can_collide_rdwr.end())
+			return it->second;
+		auto &wport = mem.wr_ports[widx];
+		int aeq = addr_eq(port.addr, wport.addr);
+		int wen_sat = qcsat.importSigBit(wen);
+		qcsat.prepare();
+		bool res = qcsat.ez->solve(aeq, wen_sat, port_ren);
+		cache_can_collide_rdwr[key] = res;
+		return res;
+	}
+
+	// Returns true if both given write port bits can be active at the same
+	// time as this read port and at the same address (three-way collision).
+	bool can_collide_together(int widx1, int widx2, int bitidx) {
+		auto &wport1 = mem.wr_ports[widx1];
+		auto &wport2 = mem.wr_ports[widx2];
+		SigBit wen1 = wport1.en[bitidx];
+		SigBit wen2 = wport2.en[bitidx];
+		std::tuple<int, int, SigBit, SigBit> key(widx1, widx2, wen1, wen2);
+		auto it = cache_can_collide_together.find(key);
+		if (it != cache_can_collide_together.end())
+			return it->second;
+		int aeq1 = addr_eq(port.addr, wport1.addr);
+		int aeq2 = addr_eq(port.addr, wport2.addr);
+		int wen1_sat = qcsat.importSigBit(wen1);
+		int wen2_sat = qcsat.importSigBit(wen2);
+		qcsat.prepare();
+		bool res = qcsat.ez->solve(wen1_sat, wen2_sat, aeq1, aeq2, port_ren);
+		cache_can_collide_together[key] = res;
+		return res;
+	}
+
+	// Returns true if the given mux selection signal is a valid data-bypass
+	// signal in soft transparency logic for a given write port bit.
+	bool is_w2rbyp(int widx, SigBit wen, SigBit sel, bool neg_sel) {
+		std::tuple<int, SigBit, SigBit, bool> key(widx, wen, sel, neg_sel);
+		auto it = cache_is_w2rbyp.find(key);
+		if (it != cache_is_w2rbyp.end())
+			return it->second;
+		auto &wport = mem.wr_ports[widx];
+		int aeq = addr_eq(port.addr, wport.addr);
+		int wen_sat = qcsat.importSigBit(wen);
+		int sel_expected = qcsat.ez->AND(aeq, wen_sat);
+		int sel_sat = qcsat.importSigBit(sel);
+		if (neg_sel)
+			sel_sat = qcsat.ez->NOT(sel_sat);
+		qcsat.prepare();
+		bool res = !qcsat.ez->solve(port_ren, qcsat.ez->XOR(sel_expected, sel_sat));
+		cache_is_w2rbyp[key] = res;
+		return res;
+	}
+
+	// Returns true if the given mux selection signal can never be true
+	// when this port is active.
+	bool impossible_with_ren(SigBit sel, bool neg_sel) {
+		std::tuple<SigBit, bool> key(sel, neg_sel);
+		auto it = cache_impossible_with_ren.find(key);
+		if (it != cache_impossible_with_ren.end())
+			return it->second;
+		int sel_sat = qcsat.importSigBit(sel);
+		if (neg_sel)
+			sel_sat = qcsat.ez->NOT(sel_sat);
+		qcsat.prepare();
+		bool res = !qcsat.ez->solve(port_ren, sel_sat);
+		cache_impossible_with_ren[key] = res;
+		return res;
+	}
+
+	// Helper for data_eq: walks up a multiplexer when the value of its
+	// sel signal is constant under the assumption that this read port
+	// is active and a given other mux sel signal is true.
+	bool walk_up_mux_cond(SigBit sel, bool neg_sel, SigBit &bit) {
+		auto &drivers = qcsat.modwalker.signal_drivers[qcsat.modwalker.sigmap(bit)];
+		if (GetSize(drivers) != 1)
+			return false;
+		auto driver = *drivers.begin();
+		if (!driver.cell->type.in(ID($mux), ID($pmux)))
+			return false;
+		log_assert(driver.port == ID::Y);
+		SigSpec sig_s = driver.cell->getPort(ID::S);
+		int sel_sat = qcsat.importSigBit(sel);
+		if (neg_sel)
+			sel_sat = qcsat.ez->NOT(sel_sat);
+		bool all_0 = true;
+		int width = driver.cell->parameters.at(ID::WIDTH).as_int();
+		for (int i = 0; i < GetSize(sig_s); i++) {
+			int sbit = qcsat.importSigBit(sig_s[i]);
+			qcsat.prepare();
+			if (!qcsat.ez->solve(port_ren, sel_sat, qcsat.ez->NOT(sbit))) {
+				bit = driver.cell->getPort(ID::B)[i * width + driver.offset];
+				return true;
+			}
+			if (qcsat.ez->solve(port_ren, sel_sat, sbit))
+				all_0 = false;
+		}
+		if (all_0) {
+			bit = driver.cell->getPort(ID::A)[driver.offset];
+			return true;
+		}
+		return false;
+	}
+
+	// Returns true if a given data signal is equivalent to another, under
+	// the assumption that this read port is active and a given mux sel signal
+	// is true.  Used to match transparency logic data with write port data.
+	// The walk_up_mux_cond part is necessary because write ports in yosys
+	// tend to be connected to things like (wen ? wdata : 'x).
+	bool data_eq(SigBit sel, bool neg_sel, SigBit dbit, SigBit odbit) {
+		if (qcsat.modwalker.sigmap(dbit) == qcsat.modwalker.sigmap(odbit))
+			return true;
+		while (walk_up_mux_cond(sel, neg_sel, dbit));
+		while (walk_up_mux_cond(sel, neg_sel, odbit));
+		return qcsat.modwalker.sigmap(dbit) == qcsat.modwalker.sigmap(odbit);
+	}
+};
+
 struct MemoryDffWorker
 {
 	Module *module;
-	SigMap sigmap;
+	ModWalker modwalker;
+	FfInitVals initvals;
+	FfMergeHelper merger;
+	bool flag_no_rw_check;
 
-	vector<Cell*> dff_cells;
-	dict<SigBit, SigBit> invbits;
-	dict<SigBit, int> sigbit_users_count;
-	dict<SigSpec, Cell*> mux_cells_a, mux_cells_b;
-	pool<Cell*> forward_merged_dffs, candidate_dffs;
-	pool<SigBit> init_bits;
-
-	MemoryDffWorker(Module *module) : module(module), sigmap(module)
+	MemoryDffWorker(Module *module, bool flag_no_rw_check) : module(module), modwalker(module->design), flag_no_rw_check(flag_no_rw_check)
 	{
-		for (auto wire : module->wires()) {
-			if (wire->attributes.count("\\init") == 0)
-				continue;
-			SigSpec sig = sigmap(wire);
-			Const initval = wire->attributes.at("\\init");
-			for (int i = 0; i < GetSize(sig) && i < GetSize(initval); i++)
-				if (initval[i] == State::S0 || initval[i] == State::S1)
-					init_bits.insert(sig[i]);
-		}
+		modwalker.setup(module);
+		initvals.set(&modwalker.sigmap, module);
+		merger.set(&initvals, module);
 	}
 
-	bool find_sig_before_dff(RTLIL::SigSpec &sig, RTLIL::SigSpec &clk, bool &clk_polarity, bool after = false)
-	{
-		sigmap.apply(sig);
-
-		for (auto &bit : sig)
-		{
-			if (bit.wire == NULL)
-				continue;
-
-			if (!after && init_bits.count(sigmap(bit)))
-				return false;
-
-			for (auto cell : dff_cells)
-			{
-				if (after && forward_merged_dffs.count(cell))
+	// Starting from the output of an async read port, as long as the data
+	// signal's only user is a mux data signal, passes through the mux
+	// and remembers information about it.  Conceptually works on every
+	// bit separately, but coalesces the result when possible.
+	SigSpec walk_muxes(SigSpec data, std::vector<MuxData> &res) {
+		bool did_something;
+		do {
+			did_something = false;
+			int prev_idx = -1;
+			Cell *prev_cell = nullptr;
+			bool prev_is_b = false;
+			for (int i = 0; i < GetSize(data); i++) {
+				SigBit bit = modwalker.sigmap(data[i]);
+				auto &consumers = modwalker.signal_consumers[bit];
+				if (GetSize(consumers) != 1 || modwalker.signal_outputs.count(bit))
 					continue;
-
-				SigSpec this_clk = cell->getPort("\\CLK");
-				bool this_clk_polarity = cell->parameters["\\CLK_POLARITY"].as_bool();
-
-				if (invbits.count(this_clk)) {
-					this_clk = invbits.at(this_clk);
-					this_clk_polarity = !this_clk_polarity;
-				}
-
-				if (clk != RTLIL::SigSpec(RTLIL::State::Sx)) {
-					if (this_clk != clk)
+				auto consumer = *consumers.begin();
+				bool is_b;
+				if (consumer.cell->type == ID($mux)) {
+					if (consumer.port == ID::A) {
+						is_b = false;
+					} else if (consumer.port == ID::B) {
+						is_b = true;
+					} else {
 						continue;
-					if (this_clk_polarity != clk_polarity)
+					}
+				} else if (consumer.cell->type == ID($pmux)) {
+					if (consumer.port == ID::A) {
+						is_b = false;
+					} else {
 						continue;
-				}
-
-				RTLIL::SigSpec q_norm = cell->getPort(after ? "\\D" : "\\Q");
-				sigmap.apply(q_norm);
-
-				RTLIL::SigSpec d = q_norm.extract(bit, &cell->getPort(after ? "\\Q" : "\\D"));
-				if (d.size() != 1)
+					}
+				} else {
 					continue;
-
-				if (after && init_bits.count(d))
-					return false;
-
-				bit = d;
-				clk = this_clk;
-				clk_polarity = this_clk_polarity;
-				candidate_dffs.insert(cell);
-				goto replaced_this_bit;
+				}
+				SigSpec y = consumer.cell->getPort(ID::Y);
+				int mux_width = GetSize(y);
+				SigBit ybit = y.extract(consumer.offset);
+				if (prev_cell != consumer.cell || prev_idx+1 != i || prev_is_b != is_b) {
+					MuxData md;
+					md.base_idx = i;
+					md.size = 0;
+					md.is_b = is_b;
+					md.sig_s = consumer.cell->getPort(ID::S);
+					md.sig_other.resize(GetSize(md.sig_s));
+					prev_cell = consumer.cell;
+					prev_is_b = is_b;
+					res.push_back(md);
+				}
+				auto &md = res.back();
+				md.size++;
+				for (int j = 0; j < GetSize(md.sig_s); j++) {
+					SigBit obit = consumer.cell->getPort(is_b ? ID::A : ID::B).extract(j * mux_width + consumer.offset);
+					md.sig_other[j].append(obit);
+				}
+				prev_idx = i;
+				data[i] = ybit;
+				did_something = true;
 			}
-
-			return false;
-		replaced_this_bit:;
-		}
-
-		return true;
+		} while (did_something);
+		return data;
 	}
 
-	void handle_wr_cell(RTLIL::Cell *cell)
+	// Merges FF and possibly soft transparency logic into an asynchronous
+	// read port, making it into a synchronous one.
+	//
+	// There are three moving parts involved here:
+	//
+	// - the async port, which we start from, whose data port is input to...
+	// - an arbitrary chain of $mux and $pmux cells implementing soft transparency
+	//   logic (ie. bypassing write port's data iff the write port is active and
+	//   writing to the same address as this read port), which in turn feeds...
+	// - a final FF
+	//
+	// The async port and the mux chain are not allowed to have any users that
+	// are not part of the above.
+	//
+	// The algorithm is:
+	//
+	// 1. Walk through the muxes.
+	// 2. Recognize the final FF.
+	// 3. Knowing the FF's clock and read enable, make a list of write ports
+	//    that we'll run transparency analysis on.
+	// 4. For every mux bit, recognize it as one of:
+	//    - a transparency bypass mux for some port
+	//    - a bypass mux that feeds 'x instead (this will result in collision
+	//      don't care behavior being recognized)
+	//    - a mux that never selects the other value when read port is active,
+	//      and can thus be skipped (this is necessary because this could
+	//      be a transparency bypass mux for never-colliding port that other
+	//      passes failed to optimize)
+	//    - a mux whose other input is 'x, and can thus be skipped
+	// 5. When recognizing transparency bypasses, take care to preserve priority
+	//    behavior — when two bypasses are sequential muxes on the chain, they
+	//    effectively have priority over one another, and the transform can
+	//    only be performed when either a) their corresponding write ports
+	//    also have priority, or b) there can never be a three-way collision
+	//    between the two write ports and the read port.
+	// 6. Check consistency of per-bit transparency masks, merge them into
+	//    per-port transparency masks
+	// 7. If everything went fine in the previous steps, actually perform
+	//    the merge.
+	void handle_rd_port(Mem &mem, QuickConeSat &qcsat, int idx)
 	{
-		log("Checking cell `%s' in module `%s': ", cell->name.c_str(), module->name.c_str());
+		auto &port = mem.rd_ports[idx];
+		log("Checking read port `%s'[%d] in module `%s': ", mem.memid, idx, module->name);
 
-		RTLIL::SigSpec clk = RTLIL::SigSpec(RTLIL::State::Sx);
-		bool clk_polarity = 0;
-		candidate_dffs.clear();
-
-		RTLIL::SigSpec sig_addr = cell->getPort("\\ADDR");
-		if (!find_sig_before_dff(sig_addr, clk, clk_polarity)) {
-			log("no (compatible) $dff for address input found.\n");
+		std::vector<MuxData> muxdata;
+		SigSpec data = walk_muxes(port.data, muxdata);
+		FfData ff;
+		pool<std::pair<Cell *, int>> bits;
+		if (!merger.find_output_ff(data, ff, bits)) {
+			log("no output FF found.\n");
+			return;
+		}
+		if (!ff.has_clk) {
+			log("output latches are not supported.\n");
+			return;
+		}
+		if (ff.has_aload) {
+			log("output FF has async load, not supported.\n");
+			return;
+		}
+		if (ff.has_sr) {
+			// Latches and FFs with SR are not supported.
+			log("output FF has both set and reset, not supported.\n");
 			return;
 		}
 
-		RTLIL::SigSpec sig_data = cell->getPort("\\DATA");
-		if (!find_sig_before_dff(sig_data, clk, clk_polarity)) {
-			log("no (compatible) $dff for data input found.\n");
-			return;
-		}
-
-		RTLIL::SigSpec sig_en = cell->getPort("\\EN");
-		if (!find_sig_before_dff(sig_en, clk, clk_polarity)) {
-			log("no (compatible) $dff for enable input found.\n");
-			return;
-		}
-
-		if (clk != RTLIL::SigSpec(RTLIL::State::Sx))
-		{
-			for (auto cell : candidate_dffs)
-				forward_merged_dffs.insert(cell);
-
-			cell->setPort("\\CLK", clk);
-			cell->setPort("\\ADDR", sig_addr);
-			cell->setPort("\\DATA", sig_data);
-			cell->setPort("\\EN", sig_en);
-			cell->parameters["\\CLK_ENABLE"] = RTLIL::Const(1);
-			cell->parameters["\\CLK_POLARITY"] = RTLIL::Const(clk_polarity);
-
-			log("merged $dff to cell.\n");
-			return;
-		}
-
-		log("no (compatible) $dff found.\n");
-	}
-
-	void disconnect_dff(RTLIL::SigSpec sig)
-	{
-		sigmap.apply(sig);
-		sig.sort_and_unify();
-
-		std::stringstream sstr;
-		sstr << "$memory_dff_disconnected$" << (autoidx++);
-
-		RTLIL::SigSpec new_sig = module->addWire(sstr.str(), sig.size());
-
-		for (auto cell : module->cells())
-			if (cell->type == "$dff") {
-				RTLIL::SigSpec new_q = cell->getPort("\\Q");
-				new_q.replace(sig, new_sig);
-				cell->setPort("\\Q", new_q);
+		// Check for no_rw_check
+		bool no_rw_check = flag_no_rw_check || mem.get_bool_attribute(ID::no_rw_check);
+		for (auto attr: {ID::ram_block, ID::rom_block, ID::ram_style, ID::rom_style, ID::ramstyle, ID::romstyle, ID::syn_ramstyle, ID::syn_romstyle}) {
+			if (mem.get_string_attribute(attr) == "no_rw_check") {
+				no_rw_check = true;
 			}
-	}
+		}
 
-	void handle_rd_cell(RTLIL::Cell *cell)
-	{
-		log("Checking cell `%s' in module `%s': ", cell->name.c_str(), module->name.c_str());
+		// Construct cache.
+		MemQueryCache cache(qcsat, mem, port, ff);
 
-		bool clk_polarity = 0;
+		// Prepare information structure about all ports, recognize port bits
+		// that can never collide at all and don't need to be checked.
+		std::vector<PortData> portdata;
+		for (int i = 0; i < GetSize(mem.wr_ports); i++) {
+			PortData pd;
+			auto &wport = mem.wr_ports[i];
+			pd.relevant = true;
+			if (!wport.clk_enable)
+				pd.relevant = false;
+			if (wport.clk != ff.sig_clk)
+				pd.relevant = false;
+			if (wport.clk_polarity != ff.pol_clk)
+				pd.relevant = false;
+			// In theory, we *could* support mismatched width
+			// ports here.  However, it's not worth it — wide
+			// ports are recognized *after* memory_dff in
+			// a normal flow.
+			if (wport.wide_log2 != port.wide_log2)
+				pd.relevant = false;
+			pd.uncollidable_mask.resize(GetSize(port.data));
+			pd.transparency_mask.resize(GetSize(port.data));
+			pd.collision_x_mask.resize(GetSize(port.data));
+			if (pd.relevant) {
+				// If we got this far, this port is potentially
+				// transparent and/or has undefined collision
+				// behavior.  Now, for every bit, check if it can
+				// ever collide.
+				for (int j = 0; j < ff.width; j++) {
+					if (!cache.can_collide_rdwr(i, wport.en[j])) {
+						pd.uncollidable_mask[j] = true;
+						pd.collision_x_mask[j] = true;
+					}
+					if (no_rw_check)
+						pd.collision_x_mask[j] = true;
+				}
+			}
+			portdata.push_back(pd);
+		}
 
-		RTLIL::SigSpec clk_data = RTLIL::SigSpec(RTLIL::State::Sx);
-		RTLIL::SigSpec sig_data = cell->getPort("\\DATA");
+		// Now inspect the mux chain.
+		for (auto &md : muxdata) {
+			// We only mark transparent bits after processing a complete
+			// mux, so that the transparency priority validation check
+			// below sees transparency information as of previous mux.
+			std::vector<std::pair<PortData&, int>> trans_queue;
+			for (int sel_idx = 0; sel_idx < GetSize(md.sig_s); sel_idx++) {
+				SigBit sbit = md.sig_s[sel_idx];
+				SigSpec &odata = md.sig_other[sel_idx];
+				for (int bitidx = md.base_idx; bitidx < md.base_idx+md.size; bitidx++) {
+					SigBit odbit = odata[bitidx-md.base_idx];
+					bool recognized = false;
+					for (int pi = 0; pi < GetSize(mem.wr_ports); pi++) {
+						auto &pd = portdata[pi];
+						auto &wport = mem.wr_ports[pi];
+						if (!pd.relevant)
+							continue;
+						if (pd.uncollidable_mask[bitidx])
+							continue;
+						bool match = cache.is_w2rbyp(pi, wport.en[bitidx], sbit, md.is_b);
+						if (!match)
+							continue;
+						// If we got here, we recognized this mux sel
+						// as valid bypass sel for a given port bit.
+						if (odbit == State::Sx) {
+							// 'x, mark collision don't care.
+							pd.collision_x_mask[bitidx] = true;
+							pd.transparency_mask[bitidx] = false;
+						} else if (cache.data_eq(sbit, md.is_b, wport.data[bitidx], odbit)) {
+							// Correct data value, mark transparency,
+							// but only after verifying that priority
+							// is fine.
+							for (int k = 0; k < GetSize(mem.wr_ports); k++) {
+								if (portdata[k].transparency_mask[bitidx]) {
+									if (wport.priority_mask[k])
+										continue;
+									if (!cache.can_collide_together(pi, k, bitidx))
+										continue;
+									log("FF found, but transparency logic priority doesn't match write priority.\n");
+									return;
+								}
+							}
+							recognized = true;
+							trans_queue.push_back({pd, bitidx});
+							break;
+						} else {
+							log("FF found, but with a mux data input that doesn't seem to correspond to transparency logic.\n");
+							return;
+						}
+					}
+					if (!recognized) {
+						// If we haven't positively identified this as
+						// a bypass: it's still skippable if the
+						// data is 'x, or if the sel cannot actually be
+						// active.
+						if (odbit == State::Sx)
+							continue;
+						if (cache.impossible_with_ren(sbit, md.is_b))
+							continue;
+						log("FF found, but with a mux select that doesn't seem to correspond to transparency logic.\n");
+						return;
+					}
+				}
+			}
+			// Done with this mux, now actually apply the transparencies.
+			for (auto it : trans_queue) {
+				it.first.transparency_mask[it.second] = true;
+				it.first.collision_x_mask[it.second] = false;
+			}
+		}
 
-		for (auto bit : sigmap(sig_data))
-			if (sigbit_users_count[bit] > 1)
-				goto skip_ff_after_read_merging;
-
-		if (mux_cells_a.count(sig_data) || mux_cells_b.count(sig_data))
-		{
-			bool enable_invert = mux_cells_a.count(sig_data) != 0;
-			Cell *mux = enable_invert ? mux_cells_a.at(sig_data) : mux_cells_b.at(sig_data);
-			SigSpec check_q = sigmap(mux->getPort(enable_invert ? "\\B" : "\\A"));
-
-			sig_data = sigmap(mux->getPort("\\Y"));
-			for (auto bit : sig_data)
-				if (sigbit_users_count[bit] > 1)
-					goto skip_ff_after_read_merging;
-
-			if (find_sig_before_dff(sig_data, clk_data, clk_polarity, true) && clk_data != RTLIL::SigSpec(RTLIL::State::Sx) && sig_data == check_q)
-			{
-				disconnect_dff(sig_data);
-				cell->setPort("\\CLK", clk_data);
-				cell->setPort("\\EN", enable_invert ? module->LogicNot(NEW_ID, mux->getPort("\\S")) : mux->getPort("\\S"));
-				cell->setPort("\\DATA", sig_data);
-				cell->parameters["\\CLK_ENABLE"] = RTLIL::Const(1);
-				cell->parameters["\\CLK_POLARITY"] = RTLIL::Const(clk_polarity);
-				cell->parameters["\\TRANSPARENT"] = RTLIL::Const(0);
-				log("merged data $dff with rd enable to cell.\n");
+		// Final merging and validation of per-bit masks.
+		for (int pi = 0; pi < GetSize(mem.wr_ports); pi++) {
+			auto &pd = portdata[pi];
+			if (!pd.relevant)
+				continue;
+			bool trans = false;
+			bool non_trans = false;
+			for (int i = 0; i < ff.width; i++) {
+				if (pd.collision_x_mask[i])
+					continue;
+				if (pd.transparency_mask[i])
+					trans = true;
+				else
+					non_trans = true;
+			}
+			if (trans && non_trans) {
+				log("FF found, but soft transparency logic is inconsistent for port %d.\n", pi);
 				return;
 			}
+			pd.final_transparency = trans;
+			pd.final_collision_x = !trans && !non_trans;
 		}
+
+		// OK, it worked.
+		log("merging output FF to cell.\n");
+
+		merger.remove_output_ff(bits);
+		if (ff.has_ce && !ff.pol_ce)
+			ff.sig_ce = module->LogicNot(NEW_ID, ff.sig_ce);
+		if (ff.has_arst && !ff.pol_arst)
+			ff.sig_arst = module->LogicNot(NEW_ID, ff.sig_arst);
+		if (ff.has_srst && !ff.pol_srst)
+			ff.sig_srst = module->LogicNot(NEW_ID, ff.sig_srst);
+		port.clk = ff.sig_clk;
+		port.clk_enable = true;
+		port.clk_polarity = ff.pol_clk;
+		if (ff.has_ce)
+			port.en = ff.sig_ce;
 		else
-		{
-			if (find_sig_before_dff(sig_data, clk_data, clk_polarity, true) && clk_data != RTLIL::SigSpec(RTLIL::State::Sx))
-			{
-				disconnect_dff(sig_data);
-				cell->setPort("\\CLK", clk_data);
-				cell->setPort("\\EN", State::S1);
-				cell->setPort("\\DATA", sig_data);
-				cell->parameters["\\CLK_ENABLE"] = RTLIL::Const(1);
-				cell->parameters["\\CLK_POLARITY"] = RTLIL::Const(clk_polarity);
-				cell->parameters["\\TRANSPARENT"] = RTLIL::Const(0);
-				log("merged data $dff to cell.\n");
+			port.en = State::S1;
+		if (ff.has_arst) {
+			port.arst = ff.sig_arst;
+			port.arst_value = ff.val_arst;
+		} else {
+			port.arst = State::S0;
+		}
+		if (ff.has_srst) {
+			port.srst = ff.sig_srst;
+			port.srst_value = ff.val_srst;
+			port.ce_over_srst = ff.ce_over_srst;
+		} else {
+			port.srst = State::S0;
+		}
+		port.init_value = ff.val_init;
+		port.data = ff.sig_q;
+		for (int pi = 0; pi < GetSize(mem.wr_ports); pi++) {
+			auto &pd = portdata[pi];
+			if (!pd.relevant)
+				continue;
+			if (pd.final_collision_x) {
+				log("    Write port %d: don't care on collision.\n", pi);
+				port.collision_x_mask[pi] = true;
+			} else if (pd.final_transparency) {
+				log("    Write port %d: transparent.\n", pi);
+				port.transparency_mask[pi] = true;
+			} else {
+				log("    Write port %d: non-transparent.\n", pi);
+			}
+		}
+		mem.emit();
+	}
+
+	void handle_rd_port_addr(Mem &mem, int idx)
+	{
+		auto &port = mem.rd_ports[idx];
+		log("Checking read port address `%s'[%d] in module `%s': ", mem.memid, idx, module->name);
+
+		FfData ff;
+		pool<std::pair<Cell *, int>> bits;
+		if (!merger.find_input_ff(port.addr, ff, bits)) {
+			log("no address FF found.\n");
+			return;
+		}
+		if (!ff.has_clk) {
+			log("address latches are not supported.\n");
+			return;
+		}
+		if (ff.has_aload) {
+			log("address FF has async load, not supported.\n");
+			return;
+		}
+		if (ff.has_sr || ff.has_arst) {
+			log("address FF has async set and/or reset, not supported.\n");
+			return;
+		}
+		// Trick part: this transform is invalid if the initial
+		// value of the FF is fully-defined.  However, we
+		// cannot simply reject FFs with any defined init bit,
+		// as this is often the result of merging a const bit.
+		if (ff.val_init.is_fully_def()) {
+			log("address FF has fully-defined init value, not supported.\n");
+			return;
+		}
+		for (int i = 0; i < GetSize(mem.wr_ports); i++) {
+			auto &wport = mem.wr_ports[i];
+			if (!wport.clk_enable || wport.clk != ff.sig_clk || wport.clk_polarity != ff.pol_clk) {
+				log("address FF clock is not compatible with write clock.\n");
 				return;
 			}
 		}
-
-	skip_ff_after_read_merging:;
-		RTLIL::SigSpec clk_addr = RTLIL::SigSpec(RTLIL::State::Sx);
-		RTLIL::SigSpec sig_addr = cell->getPort("\\ADDR");
-		if (find_sig_before_dff(sig_addr, clk_addr, clk_polarity) &&
-				clk_addr != RTLIL::SigSpec(RTLIL::State::Sx))
-		{
-			cell->setPort("\\CLK", clk_addr);
-			cell->setPort("\\EN", State::S1);
-			cell->setPort("\\ADDR", sig_addr);
-			cell->parameters["\\CLK_ENABLE"] = RTLIL::Const(1);
-			cell->parameters["\\CLK_POLARITY"] = RTLIL::Const(clk_polarity);
-			cell->parameters["\\TRANSPARENT"] = RTLIL::Const(1);
-			log("merged address $dff to cell.\n");
-			return;
-		}
-
-		log("no (compatible) $dff found.\n");
+		// Now we're commited to merge it.
+		merger.mark_input_ff(bits);
+		// If the address FF has enable and/or sync reset, unmap it.
+		ff.unmap_ce_srst();
+		port.clk = ff.sig_clk;
+		port.en = State::S1;
+		port.addr = ff.sig_d;
+		port.clk_enable = true;
+		port.clk_polarity = ff.pol_clk;
+		for (int i = 0; i < GetSize(mem.wr_ports); i++)
+			port.transparency_mask[i] = true;
+		mem.emit();
+		log("merged address FF to cell.\n");
 	}
 
-	void run(bool flag_wr_only)
+	void run()
 	{
-		for (auto wire : module->wires()) {
-			if (wire->port_output)
-				for (auto bit : sigmap(wire))
-					sigbit_users_count[bit]++;
-		}
-
-		for (auto cell : module->cells()) {
-			if (cell->type == "$dff")
-				dff_cells.push_back(cell);
-			if (cell->type == "$mux") {
-				mux_cells_a[sigmap(cell->getPort("\\A"))] = cell;
-				mux_cells_b[sigmap(cell->getPort("\\B"))] = cell;
+		std::vector<Mem> memories = Mem::get_selected_memories(module);
+		for (auto &mem : memories) {
+			QuickConeSat qcsat(modwalker);
+			for (int i = 0; i < GetSize(mem.rd_ports); i++) {
+				if (!mem.rd_ports[i].clk_enable)
+					handle_rd_port(mem, qcsat, i);
 			}
-			if (cell->type == "$not" || cell->type == "$_NOT_" || (cell->type == "$logic_not" && GetSize(cell->getPort("\\A")) == 1)) {
-				SigSpec sig_a = cell->getPort("\\A");
-				SigSpec sig_y = cell->getPort("\\Y");
-				if (cell->type == "$not")
-					sig_a.extend_u0(GetSize(sig_y), cell->getParam("\\A_SIGNED").as_bool());
-				if (cell->type == "$logic_not")
-					sig_y.extend_u0(1);
-				for (int i = 0; i < GetSize(sig_y); i++)
-					invbits[sig_y[i]] = sig_a[i];
-			}
-			for (auto &conn : cell->connections())
-				if (!cell->known() || cell->input(conn.first))
-					for (auto bit : sigmap(conn.second))
-						sigbit_users_count[bit]++;
 		}
-
-		for (auto cell : module->selected_cells())
-			if (cell->type == "$memwr" && !cell->parameters["\\CLK_ENABLE"].as_bool())
-				handle_wr_cell(cell);
-
-		if (!flag_wr_only)
-			for (auto cell : module->selected_cells())
-				if (cell->type == "$memrd" && !cell->parameters["\\CLK_ENABLE"].as_bool())
-					handle_rd_cell(cell);
+		for (auto &mem : memories) {
+			for (int i = 0; i < GetSize(mem.rd_ports); i++) {
+				if (!mem.rd_ports[i].clk_enable)
+					handle_rd_port_addr(mem, i);
+			}
+		}
 	}
 };
 
 struct MemoryDffPass : public Pass {
-	MemoryDffPass() : Pass("memory_dff", "merge input/output DFFs into memories") { }
-	void help() YS_OVERRIDE
+	MemoryDffPass() : Pass("memory_dff", "merge input/output DFFs into memory read ports") { }
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    memory_dff [options] [selection]\n");
+		log("    memory_dff [-no-rw-check] [selection]\n");
 		log("\n");
-		log("This pass detects DFFs at memory ports and merges them into the memory port.\n");
-		log("I.e. it consumes an asynchronous memory port and the flip-flops at its\n");
+		log("This pass detects DFFs at memory read ports and merges them into the memory\n");
+		log("port. I.e. it consumes an asynchronous memory port and the flip-flops at its\n");
 		log("interface and yields a synchronous memory port.\n");
 		log("\n");
-		log("    -nordfff\n");
-		log("        do not merge registers on read ports\n");
+		log("    -no-rw-check\n");
+		log("        marks all recognized read ports as \"return don't-care value on\n");
+		log("        read/write collision\" (same result as setting the no_rw_check\n");
+		log("        attribute on all memories).\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		bool flag_wr_only = false;
-
-		log_header(design, "Executing MEMORY_DFF pass (merging $dff cells to $memrd and $memwr).\n");
+		bool flag_no_rw_check = false;
+		log_header(design, "Executing MEMORY_DFF pass (merging $dff cells to $memrd).\n");
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
-			if (args[argidx] == "-nordff" || args[argidx] == "-wr_only") {
-				flag_wr_only = true;
+			if (args[argidx] == "-no-rw-check") {
+				flag_no_rw_check = true;
 				continue;
 			}
 			break;
@@ -314,8 +657,8 @@ struct MemoryDffPass : public Pass {
 		extra_args(args, argidx, design);
 
 		for (auto mod : design->selected_modules()) {
-			MemoryDffWorker worker(mod);
-			worker.run(flag_wr_only);
+			MemoryDffWorker worker(mod, flag_no_rw_check);
+			worker.run();
 		}
 	}
 } MemoryDffPass;

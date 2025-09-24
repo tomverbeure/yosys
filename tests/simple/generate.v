@@ -90,5 +90,236 @@ generate
 		endcase
 	end
 endgenerate
+endmodule
 
+// ------------------------------------------
+
+module gen_test4(a, b);
+
+input [3:0] a;
+output [3:0] b;
+
+genvar i;
+generate
+	for (i=0; i < 3; i=i+1) begin : foo
+		localparam PREV = i - 1;
+		wire temp;
+		if (i == 0)
+			assign temp = a[0];
+		else
+			assign temp = foo[PREV].temp & a[i];
+		assign b[i] = temp;
+	end
+endgenerate
+endmodule
+
+// ------------------------------------------
+
+module gen_test5(input_bits, out);
+
+parameter WIDTH = 256;
+parameter CHUNK = 4;
+
+input [WIDTH-1:0] input_bits;
+output out;
+
+genvar step, i, j;
+generate
+	for (step = 1; step <= WIDTH; step = step * CHUNK) begin : steps
+		localparam PREV = step / CHUNK;
+		localparam DIM = WIDTH / step;
+		for (i = 0; i < DIM; i = i + 1) begin : outer
+			localparam LAST_START = i * CHUNK;
+			for (j = 0; j < CHUNK; j = j + 1) begin : inner
+				wire temp;
+				if (step == 1)
+					assign temp = input_bits[i];
+				else if (j == 0)
+					assign temp = steps[PREV].outer[LAST_START].val;
+				else
+					assign temp
+						= steps[step].outer[i].inner[j-1].temp
+						& steps[PREV].outer[LAST_START + j].val;
+			end
+			wire val;
+			assign val = steps[step].outer[i].inner[CHUNK - 1].temp;
+		end
+	end
+endgenerate
+assign out = steps[WIDTH].outer[0].val;
+endmodule
+
+// ------------------------------------------
+
+module gen_test6(output [3:0] o);
+generate
+    genvar i;
+    for (i = 3; i >= 0; i = i-1) begin
+        assign o[i] = 1'b0;
+    end
+endgenerate
+endmodule
+
+// ------------------------------------------
+
+module gen_test7;
+	reg [2:0] out1;
+	reg [2:0] out2;
+	wire [2:0] out3;
+	generate
+		if (1) begin : cond
+			reg [2:0] sub_out1;
+			reg [2:0] sub_out2;
+			wire [2:0] sub_out3;
+			initial begin : init
+				reg signed [31:0] x;
+				x = 2 ** 2;
+				out1 = x;
+				sub_out1 = x;
+			end
+			always @* begin : proc
+				reg signed [31:0] x;
+				x = 2 ** 1;
+				out2 = x;
+				sub_out2 = x;
+			end
+			genvar x;
+			for (x = 0; x < 3; x = x + 1) begin
+				assign out3[x] = 1;
+				assign sub_out3[x] = 1;
+			end
+		end
+	endgenerate
+
+// `define VERIFY
+`ifdef VERIFY
+	assert property (out1 == 4);
+	assert property (out2 == 2);
+	assert property (out3 == 7);
+	assert property (cond.sub_out1 == 4);
+	assert property (cond.sub_out2 == 2);
+	assert property (cond.sub_out3 == 7);
+`endif
+endmodule
+
+// ------------------------------------------
+
+module gen_test8;
+
+// `define VERIFY
+`ifdef VERIFY
+	`define ASSERT(expr) assert property (expr);
+`else
+	`define ASSERT(expr)
+`endif
+
+	wire [1:0] x = 2'b11;
+	generate
+		if (1) begin : A
+			wire [1:0] x;
+			if (1) begin : B
+				wire [1:0] x = 2'b00;
+				`ASSERT(x == 0)
+				`ASSERT(A.x == 2)
+				`ASSERT(A.C.x == 1)
+				`ASSERT(A.B.x == 0)
+				`ASSERT(gen_test8.x == 3)
+				`ASSERT(gen_test8.A.x == 2)
+				`ASSERT(gen_test8.A.C.x == 1)
+				`ASSERT(gen_test8.A.B.x == 0)
+			end
+			if (1) begin : C
+				wire [1:0] x = 2'b01;
+				`ASSERT(x == 1)
+				`ASSERT(A.x == 2)
+				`ASSERT(A.C.x == 1)
+				`ASSERT(A.B.x == 0)
+				`ASSERT(gen_test8.x == 3)
+				`ASSERT(gen_test8.A.x == 2)
+				`ASSERT(gen_test8.A.C.x == 1)
+				`ASSERT(gen_test8.A.B.x == 0)
+			end
+			assign x = B.x ^ 2'b11 ^ C.x;
+			`ASSERT(x == 2)
+			`ASSERT(A.x == 2)
+			`ASSERT(A.C.x == 1)
+			`ASSERT(A.B.x == 0)
+			`ASSERT(gen_test8.x == 3)
+			`ASSERT(gen_test8.A.x == 2)
+			`ASSERT(gen_test8.A.C.x == 1)
+			`ASSERT(gen_test8.A.B.x == 0)
+		end
+	endgenerate
+
+	`ASSERT(x == 3)
+	`ASSERT(A.x == 2)
+	`ASSERT(A.C.x == 1)
+	`ASSERT(A.B.x == 0)
+	`ASSERT(gen_test8.x == 3)
+	`ASSERT(gen_test8.A.x == 2)
+	`ASSERT(gen_test8.A.C.x == 1)
+	`ASSERT(gen_test8.A.B.x == 0)
+endmodule
+
+// ------------------------------------------
+
+module gen_test9;
+
+// `define VERIFY
+`ifdef VERIFY
+	`define ASSERT(expr) assert property (expr);
+`else
+	`define ASSERT(expr)
+`endif
+
+	wire [1:0] w = 2'b11;
+	generate
+		begin : A
+			wire [1:0] x;
+			begin : B
+				wire [1:0] y = 2'b00;
+				`ASSERT(w == 3)
+				`ASSERT(x == 2)
+				`ASSERT(y == 0)
+				`ASSERT(A.x == 2)
+				`ASSERT(A.C.z == 1)
+				`ASSERT(A.B.y == 0)
+				`ASSERT(gen_test9.w == 3)
+				`ASSERT(gen_test9.A.x == 2)
+				`ASSERT(gen_test9.A.C.z == 1)
+				`ASSERT(gen_test9.A.B.y == 0)
+			end
+			begin : C
+				wire [1:0] z = 2'b01;
+				`ASSERT(w == 3)
+				`ASSERT(x == 2)
+				`ASSERT(z == 1)
+				`ASSERT(A.x == 2)
+				`ASSERT(A.C.z == 1)
+				`ASSERT(A.B.y == 0)
+				`ASSERT(gen_test9.w == 3)
+				`ASSERT(gen_test9.A.x == 2)
+				`ASSERT(gen_test9.A.C.z == 1)
+				`ASSERT(gen_test9.A.B.y == 0)
+			end
+			assign x = B.y ^ 2'b11 ^ C.z;
+			`ASSERT(x == 2)
+			`ASSERT(A.x == 2)
+			`ASSERT(A.C.z == 1)
+			`ASSERT(A.B.y == 0)
+			`ASSERT(gen_test9.w == 3)
+			`ASSERT(gen_test9.A.x == 2)
+			`ASSERT(gen_test9.A.C.z == 1)
+			`ASSERT(gen_test9.A.B.y == 0)
+		end
+	endgenerate
+
+	`ASSERT(w == 3)
+	`ASSERT(A.x == 2)
+	`ASSERT(A.C.z == 1)
+	`ASSERT(A.B.y == 0)
+	`ASSERT(gen_test9.w == 3)
+	`ASSERT(gen_test9.A.x == 2)
+	`ASSERT(gen_test9.A.C.z == 1)
+	`ASSERT(gen_test9.A.B.y == 0)
 endmodule

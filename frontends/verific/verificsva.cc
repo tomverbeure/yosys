@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -36,6 +36,8 @@
 // basic_property:
 //   sequence
 //   not basic_property
+//   nexttime basic_property
+//   nexttime[N] basic_property
 //   sequence #-# basic_property
 //   sequence #=# basic_property
 //   basic_property or basic_property           (cover only)
@@ -78,6 +80,7 @@ USING_YOSYS_NAMESPACE
 using namespace Verific;
 //#endif
 
+#ifdef VERIFIC_SYSTEMVERILOG_SUPPORT
 PRIVATE_NAMESPACE_BEGIN
 
 // Non-deterministic FSM
@@ -357,7 +360,7 @@ struct SvaFsm
 		for (int i = 0; i < GetSize(nodes); i++)
 		{
 			if (next_state_sig[i] != State::S0) {
-				clocking.addDff(NEW_ID, next_state_sig[i], state_wire[i], Const(0, 1));
+				clocking.addDff(NEW_ID, next_state_sig[i], state_wire[i], State::S0);
 			} else {
 				module->connect(state_wire[i], State::S0);
 			}
@@ -476,14 +479,14 @@ struct SvaFsm
 					GetSize(dnode.ctrl), verific_sva_fsm_limit);
 		}
 
-		for (int i = 0; i < (1 << GetSize(dnode.ctrl)); i++)
+		for (unsigned long long i = 0; i < (1ull << GetSize(dnode.ctrl)); i++)
 		{
 			Const ctrl_val(i, GetSize(dnode.ctrl));
 			pool<SigBit> ctrl_bits;
 
-			for (int i = 0; i < GetSize(dnode.ctrl); i++)
-				if (ctrl_val[i] == State::S1)
-					ctrl_bits.insert(dnode.ctrl[i]);
+			for (int j = 0; j < GetSize(dnode.ctrl); j++)
+				if (ctrl_val[j] == State::S1)
+					ctrl_bits.insert(dnode.ctrl[j]);
 
 			vector<int> new_state;
 			bool accept = false, cond = false;
@@ -572,7 +575,7 @@ struct SvaFsm
 
 				if (delta_pos >= 0 && i_within_j && j_within_i) {
 					did_something = true;
-					values[i][delta_pos] = State::Sa;
+					values[i].bits()[delta_pos] = State::Sa;
 					values[j] = values.back();
 					values.pop_back();
 					goto next_pair;
@@ -1021,28 +1024,34 @@ struct VerificSvaImporter
 	[[noreturn]] void parser_error(std::string errmsg)
 	{
 		if (!importer->mode_keep)
-			log_error("%s", errmsg.c_str());
-		log_warning("%s", errmsg.c_str());
+			log_error("%s", errmsg);
+		log_warning("%s", errmsg);
 		throw ParserErrorException();
 	}
 
 	[[noreturn]] void parser_error(std::string errmsg, linefile_type loc)
 	{
-		parser_error(stringf("%s at %s:%d.\n", errmsg.c_str(), LineFile::GetFileName(loc), LineFile::GetLineNo(loc)));
+		parser_error(stringf("%s at %s:%d.\n", errmsg, LineFile::GetFileName(loc), LineFile::GetLineNo(loc)));
 	}
 
 	[[noreturn]] void parser_error(std::string errmsg, Instance *inst)
 	{
-		parser_error(stringf("%s at %s (%s)", errmsg.c_str(), inst->View()->Owner()->Name(), inst->Name()), inst->Linefile());
+		parser_error(stringf("%s at %s (%s)", errmsg, inst->View()->Owner()->Name(), inst->Name()), inst->Linefile());
 	}
 
 	[[noreturn]] void parser_error(Instance *inst)
 	{
-		parser_error(stringf("Verific SVA primitive %s (%s) is currently unsupported in this context",
-				inst->View()->Owner()->Name(), inst->Name()), inst->Linefile());
+		std::string msg;
+		if (inst->Type() == PRIM_SVA_MATCH_ITEM_TRIGGER || inst->Type() == PRIM_SVA_MATCH_ITEM_ASSIGN)
+		{
+			msg = "SVA sequences with local variable assignments are currently not supported.\n";
+		}
+
+		parser_error(stringf("%sVerific SVA primitive %s (%s) is currently unsupported in this context",
+				msg.c_str(), inst->View()->Owner()->Name(), inst->Name()), inst->Linefile());
 	}
 
-	dict<Net*, bool, hash_ptr_ops> check_expression_cache;
+	dict<Net*, bool> check_expression_cache;
 
 	bool check_expression(Net *net, bool raise_error = false)
 	{
@@ -1262,6 +1271,26 @@ struct VerificSvaImporter
 			}
 
 			return node;
+		}
+
+		if (inst->Type() == PRIM_SVA_NEXTTIME || inst->Type() == PRIM_SVA_S_NEXTTIME)
+		{
+			const char *sva_low_s = inst->GetAttValue("sva:low");
+			const char *sva_high_s = inst->GetAttValue("sva:high");
+
+			int sva_low = atoi(sva_low_s);
+			int sva_high = atoi(sva_high_s);
+			log_assert(sva_low == sva_high);
+
+			int node = start_node;
+
+			for (int i = 0; i < sva_low; i++) {
+				int next_node = fsm.createNode();
+				fsm.createEdge(node, next_node);
+				node = next_node;
+			}
+
+			return parse_sequence(fsm, node, inst->GetInput());
 		}
 
 		if (inst->Type() == PRIM_SVA_SEQ_CONCAT)
@@ -1494,10 +1523,13 @@ struct VerificSvaImporter
 		if (inst == nullptr)
 			return false;
 
-		if (clocking.cond_net != nullptr)
+		if (clocking.cond_net != nullptr) {
 			trig = importer->net_map_at(clocking.cond_net);
-		else
+			if (!clocking.cond_pol)
+				trig = module->Not(NEW_ID, trig);
+		} else {
 			trig = State::S1;
+		}
 
 		if (inst->Type() == PRIM_SVA_S_EVENTUALLY || inst->Type() == PRIM_SVA_EVENTUALLY)
 		{
@@ -1559,21 +1591,32 @@ struct VerificSvaImporter
 
 		SigBit trig = State::S1;
 
-		if (clocking.cond_net != nullptr)
+		if (clocking.cond_net != nullptr) {
 			trig = importer->net_map_at(clocking.cond_net);
+			if (!clocking.cond_pol)
+				trig = module->Not(NEW_ID, trig);
+		}
 
 		if (inst == nullptr)
 		{
-			log_assert(trig == State::S1);
-
-			if (accept_p != nullptr)
-				*accept_p = importer->net_map_at(net);
-			if (reject_p != nullptr)
-				*reject_p = module->Not(NEW_ID, importer->net_map_at(net));
+			if (trig != State::S1) {
+				if (accept_p != nullptr)
+					*accept_p = module->And(NEW_ID, trig, importer->net_map_at(net));
+				if (reject_p != nullptr)
+					*reject_p = module->And(NEW_ID, trig, module->Not(NEW_ID, importer->net_map_at(net)));
+			} else {
+				if (accept_p != nullptr)
+					*accept_p = importer->net_map_at(net);
+				if (reject_p != nullptr)
+					*reject_p = module->Not(NEW_ID, importer->net_map_at(net));
+			}
 		}
 		else
 		if (inst->Type() == PRIM_SVA_OVERLAPPED_IMPLICATION ||
-				inst->Type() == PRIM_SVA_NON_OVERLAPPED_IMPLICATION)
+				inst->Type() == PRIM_SVA_NON_OVERLAPPED_IMPLICATION ||
+				(mode_cover && (
+					inst->Type() == PRIM_SVA_OVERLAPPED_FOLLOWED_BY ||
+					inst->Type() == PRIM_SVA_NON_OVERLAPPED_FOLLOWED_BY)))
 		{
 			Net *antecedent_net = inst->GetInput1();
 			Net *consequent_net = inst->GetInput2();
@@ -1581,7 +1624,7 @@ struct VerificSvaImporter
 
 			SvaFsm antecedent_fsm(clocking, trig);
 			node = parse_sequence(antecedent_fsm, antecedent_fsm.createStartNode(), antecedent_net);
-			if (inst->Type() == PRIM_SVA_NON_OVERLAPPED_IMPLICATION) {
+			if (inst->Type() == PRIM_SVA_NON_OVERLAPPED_IMPLICATION || inst->Type() == PRIM_SVA_NON_OVERLAPPED_FOLLOWED_BY) {
 				int next_node = antecedent_fsm.createNode();
 				antecedent_fsm.createEdge(node, next_node);
 				node = next_node;
@@ -1590,15 +1633,25 @@ struct VerificSvaImporter
 			Instance *consequent_inst = net_to_ast_driver(consequent_net);
 
 			if (consequent_inst && (consequent_inst->Type() == PRIM_SVA_UNTIL || consequent_inst->Type() == PRIM_SVA_S_UNTIL ||
-					consequent_inst->Type() == PRIM_SVA_UNTIL_WITH || consequent_inst->Type() == PRIM_SVA_S_UNTIL_WITH))
+					consequent_inst->Type() == PRIM_SVA_UNTIL_WITH || consequent_inst->Type() == PRIM_SVA_S_UNTIL_WITH ||
+					consequent_inst->Type() == PRIM_SVA_ALWAYS || consequent_inst->Type() == PRIM_SVA_S_ALWAYS))
 			{
 				bool until_with = consequent_inst->Type() == PRIM_SVA_UNTIL_WITH || consequent_inst->Type() == PRIM_SVA_S_UNTIL_WITH;
 
-				Net *until_net = consequent_inst->GetInput2();
-				consequent_net = consequent_inst->GetInput1();
-				consequent_inst = net_to_ast_driver(consequent_net);
+				Net *until_net = nullptr;
+				if (consequent_inst->Type() == PRIM_SVA_ALWAYS || consequent_inst->Type() == PRIM_SVA_S_ALWAYS)
+				{
+					consequent_net = consequent_inst->GetInput();
+					consequent_inst = net_to_ast_driver(consequent_net);
+				}
+				else
+				{
+					until_net = consequent_inst->GetInput2();
+					consequent_net = consequent_inst->GetInput1();
+					consequent_inst = net_to_ast_driver(consequent_net);
+				}
 
-				SigBit until_sig = parse_expression(until_net);
+				SigBit until_sig = until_net ? parse_expression(until_net) : RTLIL::S0;
 				SigBit not_until_sig = module->Not(NEW_ID, until_sig);
 				antecedent_fsm.createEdge(node, node, not_until_sig);
 
@@ -1666,7 +1719,20 @@ struct VerificSvaImporter
 				log("  importing SVA property at root cell %s (%s) at %s:%d.\n", root->Name(), root->View()->Owner()->Name(),
 						LineFile::GetFileName(root->Linefile()), LineFile::GetLineNo(root->Linefile()));
 
-			RTLIL::IdString root_name = module->uniquify(importer->mode_names || root->IsUserDeclared() ? RTLIL::escape_id(root->Name()) : NEW_ID);
+			bool is_user_declared = root->IsUserDeclared();
+
+			// FIXME
+			if (!is_user_declared) {
+				const char *name = root->Name();
+				for (int i = 0; name[i]; i++) {
+					if (i ? (name[i] < '0' || name[i] > '9') : (name[i] != 'i')) {
+						is_user_declared = true;
+						break;
+					}
+				}
+			}
+
+			RTLIL::IdString root_name = module->uniquify(importer->mode_names || is_user_declared ? RTLIL::escape_id(root->Name()) : NEW_ID);
 
 			// parse SVA sequence into trigger signal
 
@@ -1708,6 +1774,11 @@ struct VerificSvaImporter
 						clocking.addDff(NEW_ID, sig_en, sig_en_q, State::S0);
 					}
 
+					// accept in disable case
+
+					if (clocking.disable_sig != State::S0)
+						sig_a_q = module->Or(NEW_ID, sig_a_q, clocking.disable_sig);
+
 					// generate fair/live cell
 
 					RTLIL::Cell *c = nullptr;
@@ -1715,7 +1786,7 @@ struct VerificSvaImporter
 					if (mode_assert) c = module->addLive(root_name, sig_a_q, sig_en_q);
 					if (mode_assume) c = module->addFair(root_name, sig_a_q, sig_en_q);
 
-					importer->import_attributes(c->attributes, root);
+					if (c) importer->import_attributes(c->attributes, root);
 
 					return;
 				}
@@ -1760,7 +1831,7 @@ struct VerificSvaImporter
 				if (mode_assume) c = module->addAssume(root_name, sig_a_q, sig_en_q);
 				if (mode_cover) c = module->addCover(root_name, sig_a_q, sig_en_q);
 
-				importer->import_attributes(c->attributes, root);
+				if (c) importer->import_attributes(c->attributes, root);
 			}
 		}
 		catch (ParserErrorException)
@@ -1811,5 +1882,8 @@ bool verific_is_sva_net(VerificImporter *importer, Verific::Net *net)
 	worker.importer = importer;
 	return worker.net_to_ast_driver(net) != nullptr;
 }
-
+#else
+YOSYS_NAMESPACE_BEGIN
+pool<int> verific_sva_prims = {};
+#endif
 YOSYS_NAMESPACE_END

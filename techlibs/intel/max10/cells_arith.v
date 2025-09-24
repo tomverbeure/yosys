@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -26,8 +26,11 @@ module _80_altera_max10_alu (A, B, CI, BI, X, Y, CO);
    parameter B_WIDTH  = 1;
    parameter Y_WIDTH  = 1;
 
+	(* force_downto *)
 	input [A_WIDTH-1:0] A;
+	(* force_downto *)
 	input [B_WIDTH-1:0] B;
+	(* force_downto *)
 	output [Y_WIDTH-1:0] X, Y;
 
 	input CI, BI;
@@ -36,11 +39,14 @@ module _80_altera_max10_alu (A, B, CI, BI, X, Y, CO);
 
 	wire _TECHMAP_FAIL_ = Y_WIDTH <= 4;
 
+	(* force_downto *)
 	wire [Y_WIDTH-1:0] A_buf, B_buf;
 	\$pos #(.A_SIGNED(A_SIGNED), .A_WIDTH(A_WIDTH), .Y_WIDTH(Y_WIDTH)) A_conv (.A(A), .Y(A_buf));
 	\$pos #(.A_SIGNED(B_SIGNED), .A_WIDTH(B_WIDTH), .Y_WIDTH(Y_WIDTH)) B_conv (.A(B), .Y(B_buf));
 
+	(* force_downto *)
 	wire [Y_WIDTH-1:0] AA = A_buf;
+	(* force_downto *)
 	wire [Y_WIDTH-1:0] BB = BI ? ~B_buf : B_buf;
 	//wire [Y_WIDTH:0] C = {CO, CI};
         wire [Y_WIDTH+1:0] COx;

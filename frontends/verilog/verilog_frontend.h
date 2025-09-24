@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -31,65 +31,33 @@
 
 #include "kernel/yosys.h"
 #include "frontends/ast/ast.h"
+
 #include <stdio.h>
 #include <stdint.h>
-#include <list>
 
 YOSYS_NAMESPACE_BEGIN
 
 namespace VERILOG_FRONTEND
 {
-	// this variable is set to a new AST_DESIGN node and then filled with the AST by the bison parser
-	extern struct AST::AstNode *current_ast;
+	/* Ephemeral context class */
+	struct ConstParser {
+		AST::AstSrcLocType loc;
+	private:
+		void log_maybe_loc_error(std::string msg);
+		void log_maybe_loc_warn(std::string msg);
+		// divide an arbitrary length decimal number by two and return the rest
+		int my_decimal_div_by_two(std::vector<uint8_t> &digits);
+		// find the number of significant bits in a binary number (not including the sign bit)
+		int my_ilog2(int x);
+		// parse a binary, decimal, hexadecimal or octal number with support for special bits ('x', 'z' and '?')
+		void my_strtobin(std::vector<RTLIL::State> &data, const char *str, int len_in_bits, int base, char case_type, bool is_unsized);
+	public:
+		// convert the Verilog code for a constant to an AST node
+		std::unique_ptr<AST::AstNode> const2ast(std::string code, char case_type = 0, bool warn_z = false);
 
-	// this function converts a Verilog constant to an AST_CONSTANT node
-	AST::AstNode *const2ast(std::string code, char case_type = 0, bool warn_z = false);
-
-	// state of `default_nettype
-	extern bool default_nettype_wire;
-
-	// running in SystemVerilog mode
-	extern bool sv_mode;
-
-	// running in -formal mode
-	extern bool formal_mode;
-
-	// running in -noassert mode
-	extern bool noassert_mode;
-
-	// running in -noassume mode
-	extern bool noassume_mode;
-
-	// running in -norestrict mode
-	extern bool norestrict_mode;
-
-	// running in -assume-asserts mode
-	extern bool assume_asserts_mode;
-
-	// running in -assert-assumes mode
-	extern bool assert_assumes_mode;
-
-	// running in -lib mode
-	extern bool lib_mode;
-
-	// lexer input stream
-	extern std::istream *lexin;
-}
-
-// the pre-processor
-std::string frontend_verilog_preproc(std::istream &f, std::string filename, const std::map<std::string, std::string> &pre_defines_map,
-		dict<std::string, std::pair<std::string, bool>> &global_defines_cache, const std::list<std::string> &include_dirs);
+	};
+};
 
 YOSYS_NAMESPACE_END
-
-// the usual bison/flex stuff
-extern int frontend_verilog_yydebug;
-int frontend_verilog_yylex(void);
-void frontend_verilog_yyerror(char const *fmt, ...);
-void frontend_verilog_yyrestart(FILE *f);
-int frontend_verilog_yyparse(void);
-int frontend_verilog_yylex_destroy(void);
-int frontend_verilog_yyget_lineno(void);
-void frontend_verilog_yyset_lineno (int);
 
 #endif

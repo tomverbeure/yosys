@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -51,33 +51,35 @@ static void print_spice_net(std::ostream &f, RTLIL::SigBit s, std::string &neg, 
 		if (s.wire->port_id)
 			use_inames = true;
 		if (s.wire->width > 1)
-			f << stringf(" %s.%d", spice_id2str(s.wire->name, use_inames, inums).c_str(), s.offset);
+			f << stringf(" %s.%d", spice_id2str(s.wire->name, use_inames, inums), s.offset);
 		else
-			f << stringf(" %s", spice_id2str(s.wire->name, use_inames, inums).c_str());
+			f << stringf(" %s", spice_id2str(s.wire->name, use_inames, inums));
 	} else {
 		if (s == RTLIL::State::S0)
-			f << stringf(" %s", neg.c_str());
+			f << stringf(" %s", neg);
 		else if (s == RTLIL::State::S1)
-			f << stringf(" %s", pos.c_str());
+			f << stringf(" %s", pos);
 		else
-			f << stringf(" %s%d", ncpf.c_str(), nc_counter++);
+			f << stringf(" %s%d", ncpf, nc_counter++);
 	}
 }
 
-static void print_spice_module(std::ostream &f, RTLIL::Module *module, RTLIL::Design *design, std::string &neg, std::string &pos, std::string &ncpf, bool big_endian, bool use_inames)
+static void print_spice_module(std::ostream &f, RTLIL::Module *module, RTLIL::Design *design, std::string &neg, std::string &pos, std::string &buf, std::string &ncpf, bool big_endian, bool use_inames)
 {
 	SigMap sigmap(module);
 	idict<IdString, 1> inums;
 	int cell_counter = 0, conn_counter = 0, nc_counter = 0;
 
-	for (auto &cell_it : module->cells_)
+	for (auto cell : module->cells())
 	{
-		RTLIL::Cell *cell = cell_it.second;
+		if (cell->type == ID($scopeinfo))
+			continue;
+
 		f << stringf("X%d", cell_counter++);
 
 		std::vector<RTLIL::SigSpec> port_sigs;
 
-		if (design->modules_.count(cell->type) == 0)
+		if (design->module(cell->type) == nullptr)
 		{
 			log_warning("no (blackbox) module for cell type `%s' (%s.%s) found! Guessing order of ports.\n",
 					log_id(cell->type), log_id(module), log_id(cell));
@@ -88,11 +90,10 @@ static void print_spice_module(std::ostream &f, RTLIL::Module *module, RTLIL::De
 		}
 		else
 		{
-			RTLIL::Module *mod = design->modules_.at(cell->type);
+			RTLIL::Module *mod = design->module(cell->type);
 
 			std::vector<RTLIL::Wire*> ports;
-			for (auto wire_it : mod->wires_) {
-				RTLIL::Wire *wire = wire_it.second;
+			for (auto wire : mod->wires()) {
 				if (wire->port_id == 0)
 					continue;
 				while (int(ports.size()) < wire->port_id)
@@ -118,21 +119,21 @@ static void print_spice_module(std::ostream &f, RTLIL::Module *module, RTLIL::De
 			}
 		}
 
-		f << stringf(" %s\n", spice_id2str(cell->type).c_str());
+		f << stringf(" %s\n", spice_id2str(cell->type));
 	}
 
 	for (auto &conn : module->connections())
 	for (int i = 0; i < conn.first.size(); i++) {
-		f << stringf("V%d", conn_counter++);
-		print_spice_net(f, conn.first.extract(i, 1), neg, pos, ncpf, nc_counter, use_inames, inums);
+		f << (buf == "DC" ? stringf("V%d", conn_counter++) : stringf("X%d", cell_counter++));
 		print_spice_net(f, conn.second.extract(i, 1), neg, pos, ncpf, nc_counter, use_inames, inums);
-		f << stringf(" DC 0\n");
+		print_spice_net(f, conn.first.extract(i, 1), neg, pos, ncpf, nc_counter, use_inames, inums);
+		f << (buf == "DC" ? " DC 0\n" : stringf(" %s\n", buf));
 	}
 }
 
 struct SpiceBackend : public Backend {
 	SpiceBackend() : Backend("spice", "write design to SPICE netlist file") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -150,6 +151,10 @@ struct SpiceBackend : public Backend {
 		log("    -pos net_name\n");
 		log("        set the net name for constant 1 (default: Vdd)\n");
 		log("\n");
+		log("    -buf DC|subckt_name\n");
+		log("        set the name for jumper element (default: DC)\n");
+		log("        (used to connect different nets)\n");
+		log("\n");
 		log("    -nc_prefix\n");
 		log("        prefix for not-connected nets (default: _NC)\n");
 		log("\n");
@@ -161,12 +166,12 @@ struct SpiceBackend : public Backend {
 		log("        set the specified module as design top module\n");
 		log("\n");
 	}
-	void execute(std::ostream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::ostream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::string top_module_name;
 		RTLIL::Module *top_module = NULL;
 		bool big_endian = false, use_inames = false;
-		std::string neg = "Vss", pos = "Vdd", ncpf = "_NC";
+		std::string neg = "Vss", pos = "Vdd", ncpf = "_NC", buf = "DC";
 
 		log_header(design, "Executing SPICE backend.\n");
 
@@ -189,6 +194,10 @@ struct SpiceBackend : public Backend {
 				pos = args[++argidx];
 				continue;
 			}
+			if (args[argidx] == "-buf" && argidx+1 < args.size()) {
+				buf = args[++argidx];
+				continue;
+			}
 			if (args[argidx] == "-nc_prefix" && argidx+1 < args.size()) {
 				ncpf = args[++argidx];
 				continue;
@@ -202,17 +211,16 @@ struct SpiceBackend : public Backend {
 		extra_args(f, filename, args, argidx);
 
 		if (top_module_name.empty())
-			for (auto & mod_it:design->modules_)
-				if (mod_it.second->get_bool_attribute("\\top"))
-					top_module_name = mod_it.first.str();
+			for (auto module : design->modules())
+				if (module->get_bool_attribute(ID::top))
+					top_module_name = module->name.str();
 
-		*f << stringf("* SPICE netlist generated by %s\n", yosys_version_str);
+		*f << stringf("* SPICE netlist generated by %s\n", yosys_maybe_version());
 		*f << stringf("\n");
 
-		for (auto module_it : design->modules_)
+		for (auto module : design->modules())
 		{
-			RTLIL::Module *module = module_it.second;
-			if (module->get_bool_attribute("\\blackbox"))
+			if (module->get_blackbox_attribute())
 				continue;
 
 			if (module->processes.size() != 0)
@@ -226,8 +234,7 @@ struct SpiceBackend : public Backend {
 			}
 
 			std::vector<RTLIL::Wire*> ports;
-			for (auto wire_it : module->wires_) {
-				RTLIL::Wire *wire = wire_it.second;
+			for (auto wire : module->wires()) {
 				if (wire->port_id == 0)
 					continue;
 				while (int(ports.size()) < wire->port_id)
@@ -235,24 +242,24 @@ struct SpiceBackend : public Backend {
 				ports.at(wire->port_id-1) = wire;
 			}
 
-			*f << stringf(".SUBCKT %s", spice_id2str(module->name).c_str());
+			*f << stringf(".SUBCKT %s", spice_id2str(module->name));
 			for (RTLIL::Wire *wire : ports) {
 				log_assert(wire != NULL);
 				if (wire->width > 1) {
 					for (int i = 0; i < wire->width; i++)
-						*f << stringf(" %s.%d", spice_id2str(wire->name).c_str(), big_endian ? wire->width - 1 - i : i);
+						*f << stringf(" %s.%d", spice_id2str(wire->name), big_endian ? wire->width - 1 - i : i);
 				} else
-					*f << stringf(" %s", spice_id2str(wire->name).c_str());
+					*f << stringf(" %s", spice_id2str(wire->name));
 			}
 			*f << stringf("\n");
-			print_spice_module(*f, module, design, neg, pos, ncpf, big_endian, use_inames);
-			*f << stringf(".ENDS %s\n\n", spice_id2str(module->name).c_str());
+			print_spice_module(*f, module, design, neg, pos, buf, ncpf, big_endian, use_inames);
+			*f << stringf(".ENDS %s\n\n", spice_id2str(module->name));
 		}
 
 		if (!top_module_name.empty()) {
 			if (top_module == NULL)
-				log_error("Can't find top module `%s'!\n", top_module_name.c_str());
-			print_spice_module(*f, top_module, design, neg, pos, ncpf, big_endian, use_inames);
+				log_error("Can't find top module `%s'!\n", top_module_name);
+			print_spice_module(*f, top_module, design, neg, pos, buf, ncpf, big_endian, use_inames);
 			*f << stringf("\n");
 		}
 

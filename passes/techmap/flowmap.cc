@@ -250,9 +250,11 @@ struct FlowGraph
 		{
 			return !(*this == other);
 		}
-		unsigned int hash() const
+		[[nodiscard]] Hasher hash_into(Hasher h) const
 		{
-			return hash_ops<pair<RTLIL::SigBit, int>>::hash({node, is_bottom});
+			std::pair<RTLIL::SigBit, int> p = {node, is_bottom};
+			h.eat(p);
+			return h;
 		}
 
 		static NodePrime top(RTLIL::SigBit node)
@@ -394,10 +396,9 @@ struct FlowGraph
 
 	pair<pool<RTLIL::SigBit>, pool<RTLIL::SigBit>> edge_cut()
 	{
-		pool<RTLIL::SigBit> x, xi;
+		pool<RTLIL::SigBit> x = {source}, xi; // X and X̅ in the paper
 
 		NodePrime source_prime = {source, true};
-		NodePrime sink_prime = {sink, false};
 		pool<NodePrime> visited;
 		vector<NodePrime> worklist = {source_prime};
 		while (!worklist.empty())
@@ -438,6 +439,7 @@ struct FlowGraph
 		for (auto collapsed_node : collapsed[sink])
 			xi.insert(collapsed_node);
 
+		log_assert(x[source] && !xi[source]);
 		log_assert(!x[sink] && xi[sink]);
 		return {x, xi};
 	}
@@ -596,7 +598,7 @@ struct FlowmapWorker
 				continue;
 
 			if (!cell->known())
-				log_error("Cell %s (%s.%s) is unknown.\n", cell->type.c_str(), log_id(module), log_id(cell));
+				log_error("Cell %s (%s.%s) is unknown.\n", cell->type, log_id(module), log_id(cell));
 
 			pool<RTLIL::SigBit> fanout;
 			for (auto conn : cell->connections())
@@ -672,8 +674,8 @@ struct FlowmapWorker
 			labels[node] = -1;
 		for (auto input : inputs)
 		{
-			if (input.wire->attributes.count("\\$flowmap_level"))
-				labels[input] = input.wire->attributes["\\$flowmap_level"].as_int();
+			if (input.wire->attributes.count(ID($flowmap_level)))
+				labels[input] = input.wire->attributes[ID($flowmap_level)].as_int();
 			else
 				labels[input] = 0;
 		}
@@ -784,7 +786,7 @@ struct FlowmapWorker
 		int depth = 0;
 		for (auto label : labels)
 			depth = max(depth, label.second);
-		log("Mapped to %zu LUTs with maximum depth %d.\n", lut_nodes.size(), depth);
+		log("Mapped to %d LUTs with maximum depth %d.\n", GetSize(lut_nodes), depth);
 
 		if (debug)
 		{
@@ -1051,7 +1053,7 @@ struct FlowmapWorker
 
 				auto cut_inputs = cut_lut_at_gate(lut, lut_gate);
 				pool<RTLIL::SigBit> gate_inputs = cut_inputs.first, other_inputs = cut_inputs.second;
-				if (gate_inputs.empty() && (int)other_inputs.size() == order)
+				if (gate_inputs.empty() && (int)other_inputs.size() >= order)
 				{
 					if (debug_relax)
 						log("      Breaking would result in a (k+1)-LUT.\n");
@@ -1196,7 +1198,7 @@ struct FlowmapWorker
 
 	bool relax_depth_for_bound(bool first, int depth_bound, dict<RTLIL::SigBit, pool<RTLIL::SigBit>> &lut_critical_outputs)
 	{
-		size_t initial_count = lut_nodes.size();
+		int initial_count = GetSize(lut_nodes);
 
 		for (auto node : lut_nodes)
 		{
@@ -1216,7 +1218,7 @@ struct FlowmapWorker
 
 			if (potentials.empty())
 			{
-				log("  Relaxed to %zu (+%zu) LUTs.\n", lut_nodes.size(), lut_nodes.size() - initial_count);
+				log("  Relaxed to %d (+%d) LUTs.\n", GetSize(lut_nodes), GetSize(lut_nodes) - initial_count);
 				if (!first && break_num == 1)
 				{
 					log("  Design fully relaxed.\n");
@@ -1382,7 +1384,8 @@ struct FlowmapWorker
 
 			vector<RTLIL::SigBit> input_nodes(lut_edges_bw[node].begin(), lut_edges_bw[node].end());
 			RTLIL::Const lut_table(State::Sx, max(1 << input_nodes.size(), 1 << minlut));
-			for (unsigned i = 0; i < (1 << input_nodes.size()); i++)
+			unsigned const mask = 1 << input_nodes.size();
+			for (unsigned i = 0; i < mask; i++)
 			{
 				ce.push();
 				for (size_t n = 0; n < input_nodes.size(); n++)
@@ -1398,30 +1401,31 @@ struct FlowmapWorker
 					          log_signal(node), log_signal(undef), env.c_str());
 				}
 
-				lut_table[i] = value.as_bool() ? State::S1 : State::S0;
+				lut_table.set(i, value.as_bool() ? State::S1 : State::S0);
 				ce.pop();
 			}
 
 			RTLIL::SigSpec lut_a, lut_y = node;
 			for (auto input_node : input_nodes)
-				lut_a.append_bit(input_node);
-			lut_a.append(RTLIL::Const(State::Sx, minlut - input_nodes.size()));
+				lut_a.append(input_node);
+			if ((int)input_nodes.size() < minlut)
+				lut_a.append(RTLIL::Const(State::Sx, minlut - input_nodes.size()));
 
 			RTLIL::Cell *lut = module->addLut(NEW_ID, lut_a, lut_y, lut_table);
 			mapped_nodes.insert(node);
 			for (auto gate_node : lut_gates[node])
 			{
 				auto gate_origin = node_origins[gate_node];
-				lut->add_strpool_attribute("\\src", gate_origin.cell->get_strpool_attribute("\\src"));
+				lut->add_strpool_attribute(ID::src, gate_origin.cell->get_strpool_attribute(ID::src));
 				packed_count++;
 			}
 			lut_count++;
 			lut_area += lut_table.size();
 
 			if ((int)input_nodes.size() >= minlut)
-				log("  Packed into a %zu-LUT %s.%s.\n", input_nodes.size(), log_id(module), log_id(lut));
+				log("  Packed into a %d-LUT %s.%s.\n", GetSize(input_nodes), log_id(module), log_id(lut));
 			else
-				log("  Packed into a %zu-LUT %s.%s (implemented as %d-LUT).\n", input_nodes.size(), log_id(module), log_id(lut), minlut);
+				log("  Packed into a %d-LUT %s.%s (implemented as %d-LUT).\n", GetSize(input_nodes), log_id(module), log_id(lut), minlut);
 		}
 
 		for (auto node : mapped_nodes)
@@ -1469,7 +1473,7 @@ static void split(std::vector<std::string> &tokens, const std::string &text, cha
 
 struct FlowmapPass : public Pass {
 	FlowmapPass() : Pass("flowmap", "pack LUTs with FlowMap") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -1510,7 +1514,7 @@ struct FlowmapPass : public Pass {
 		log("        explain decisions performed during depth relaxation.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		int order = 3;
 		int minlut = 1;
@@ -1586,7 +1590,7 @@ struct FlowmapPass : public Pass {
 		}
 		else
 		{
-			cell_types = {"$_NOT_", "$_AND_", "$_OR_", "$_XOR_", "$_MUX_"};
+			cell_types = {ID($_NOT_), ID($_AND_), ID($_OR_), ID($_XOR_), ID($_MUX_)};
 		}
 
 		const char *algo_r = relax ? "-r" : "";

@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -81,10 +81,10 @@ struct FsmOpt
 	{
 		RTLIL::SigBit bit = sig.as_bit();
 
-		if (bit.wire == NULL || bit.wire->attributes.count("\\unused_bits") == 0)
+		if (bit.wire == NULL || bit.wire->attributes.count(ID::unused_bits) == 0)
 			return false;
 
-		char *str = strdup(bit.wire->attributes["\\unused_bits"].decode_string().c_str());
+		char *str = strdup(bit.wire->attributes[ID::unused_bits].decode_string().c_str());
 		for (char *tok = strtok(str, " "); tok != NULL; tok = strtok(NULL, " ")) {
 			if (tok[0] && bit.offset == atoi(tok)) {
 				free(str);
@@ -98,7 +98,7 @@ struct FsmOpt
 
 	void opt_const_and_unused_inputs()
 	{
-		RTLIL::SigSpec ctrl_in = cell->getPort("\\CTRL_IN");
+		RTLIL::SigSpec ctrl_in = cell->getPort(ID::CTRL_IN);
 		std::vector<bool> ctrl_in_used(ctrl_in.size());
 
 		std::vector<FsmData::transition_t> new_transition_table;
@@ -106,11 +106,11 @@ struct FsmOpt
 			for (int i = 0; i < ctrl_in.size(); i++) {
 				RTLIL::SigSpec ctrl_bit = ctrl_in.extract(i, 1);
 				if (ctrl_bit.is_fully_const()) {
-					if (tr.ctrl_in.bits[i] <= RTLIL::State::S1 && RTLIL::SigSpec(tr.ctrl_in.bits[i]) != ctrl_bit)
+					if (tr.ctrl_in[i] <= RTLIL::State::S1 && RTLIL::SigSpec(tr.ctrl_in[i]) != ctrl_bit)
 						goto delete_this_transition;
 					continue;
 				}
-				if (tr.ctrl_in.bits[i] <= RTLIL::State::S1)
+				if (tr.ctrl_in[i] <= RTLIL::State::S1)
 					ctrl_in_used[i] = true;
 			}
 			new_transition_table.push_back(tr);
@@ -119,15 +119,15 @@ struct FsmOpt
 
 		for (int i = int(ctrl_in_used.size())-1; i >= 0; i--) {
 			if (!ctrl_in_used[i]) {
-				log("  Removing unused input signal %s.\n", log_signal(cell->getPort("\\CTRL_IN").extract(i, 1)));
+				log("  Removing unused input signal %s.\n", log_signal(cell->getPort(ID::CTRL_IN).extract(i, 1)));
 				for (auto &tr : new_transition_table) {
 					RTLIL::SigSpec tmp(tr.ctrl_in);
 					tmp.remove(i, 1);
 					tr.ctrl_in = tmp.as_const();
 				}
-				RTLIL::SigSpec new_ctrl_in = cell->getPort("\\CTRL_IN");
+				RTLIL::SigSpec new_ctrl_in = cell->getPort(ID::CTRL_IN);
 				new_ctrl_in.remove(i, 1);
-				cell->setPort("\\CTRL_IN", new_ctrl_in);
+				cell->setPort(ID::CTRL_IN, new_ctrl_in);
 				fsm_data.num_inputs--;
 			}
 		}
@@ -139,12 +139,12 @@ struct FsmOpt
 	void opt_unused_outputs()
 	{
 		for (int i = 0; i < fsm_data.num_outputs; i++) {
-			RTLIL::SigSpec sig = cell->getPort("\\CTRL_OUT").extract(i, 1);
+			RTLIL::SigSpec sig = cell->getPort(ID::CTRL_OUT).extract(i, 1);
 			if (signal_is_unused(sig)) {
 				log("  Removing unused output signal %s.\n", log_signal(sig));
-				RTLIL::SigSpec new_ctrl_out = cell->getPort("\\CTRL_OUT");
+				RTLIL::SigSpec new_ctrl_out = cell->getPort(ID::CTRL_OUT);
 				new_ctrl_out.remove(i, 1);
-				cell->setPort("\\CTRL_OUT", new_ctrl_out);
+				cell->setPort(ID::CTRL_OUT, new_ctrl_out);
 				for (auto &tr : fsm_data.transition_table) {
 					RTLIL::SigSpec tmp(tr.ctrl_out);
 					tmp.remove(i, 1);
@@ -158,7 +158,7 @@ struct FsmOpt
 
 	void opt_alias_inputs()
 	{
-		RTLIL::SigSpec &ctrl_in = cell->connections_["\\CTRL_IN"];
+		RTLIL::SigSpec &ctrl_in = cell->connections_[ID::CTRL_IN];
 
 		for (int i = 0; i < ctrl_in.size(); i++)
 		for (int j = i+1; j < ctrl_in.size(); j++)
@@ -169,13 +169,16 @@ struct FsmOpt
 
 				for (auto tr : fsm_data.transition_table)
 				{
-					RTLIL::State &si = tr.ctrl_in.bits[i];
-					RTLIL::State &sj = tr.ctrl_in.bits[j];
+					RTLIL::State si = tr.ctrl_in[i];
+					RTLIL::State sj = tr.ctrl_in[j];
 
-					if (si > RTLIL::State::S1)
+					if (si > RTLIL::State::S1) {
 						si = sj;
-					else if (sj > RTLIL::State::S1)
+						tr.ctrl_in.set(i, si);
+					} else if (sj > RTLIL::State::S1) {
 						sj = si;
+						tr.ctrl_in.set(j, sj);
+					}
 
 					if (si == sj) {
 						RTLIL::SigSpec tmp(tr.ctrl_in);
@@ -195,8 +198,8 @@ struct FsmOpt
 
 	void opt_feedback_inputs()
 	{
-		RTLIL::SigSpec &ctrl_in = cell->connections_["\\CTRL_IN"];
-		RTLIL::SigSpec &ctrl_out = cell->connections_["\\CTRL_OUT"];
+		RTLIL::SigSpec &ctrl_in = cell->connections_[ID::CTRL_IN];
+		RTLIL::SigSpec &ctrl_out = cell->connections_[ID::CTRL_OUT];
 
 		for (int j = 0; j < ctrl_out.size(); j++)
 		for (int i = 0; i < ctrl_in.size(); i++)
@@ -207,8 +210,8 @@ struct FsmOpt
 
 				for (auto tr : fsm_data.transition_table)
 				{
-					RTLIL::State &si = tr.ctrl_in.bits[i];
-					RTLIL::State &sj = tr.ctrl_out.bits[j];
+					RTLIL::State si = tr.ctrl_in[i];
+					RTLIL::State sj = tr.ctrl_out[j];
 
 					if (si > RTLIL::State::S1 || si == sj) {
 						RTLIL::SigSpec tmp(tr.ctrl_in);
@@ -232,22 +235,22 @@ struct FsmOpt
 
 		for (auto &pattern : set)
 		{
-			if (pattern.bits[bit] > RTLIL::State::S1) {
+			if (pattern[bit] > RTLIL::State::S1) {
 				new_set.insert(pattern);
 				continue;
 			}
 
 			RTLIL::Const other_pattern = pattern;
 
-			if (pattern.bits[bit] == RTLIL::State::S1)
-				other_pattern.bits[bit] = RTLIL::State::S0;
+			if (pattern[bit] == RTLIL::State::S1)
+				other_pattern.set(bit, RTLIL::State::S0);
 			else
-				other_pattern.bits[bit] = RTLIL::State::S1;
+				other_pattern.set(bit, RTLIL::State::S1);
 
 			if (set.count(other_pattern) > 0) {
 				log("  Merging pattern %s and %s from group (%d %d %s).\n", log_signal(pattern), log_signal(other_pattern),
 						tr.state_in, tr.state_out, log_signal(tr.ctrl_out));
-				other_pattern.bits[bit] = RTLIL::State::Sa;
+				other_pattern.set(bit, RTLIL::State::Sa);
 				new_set.insert(other_pattern);
 				did_something = true;
 				continue;
@@ -293,7 +296,7 @@ struct FsmOpt
 
 	FsmOpt(RTLIL::Cell *cell, RTLIL::Module *module)
 	{
-		log("Optimizing FSM `%s' from module `%s'.\n", cell->name.c_str(), module->name.c_str());
+		log("Optimizing FSM `%s' from module `%s'.\n", cell->name, module->name);
 
 		fsm_data.copy_from_cell(cell);
 		this->cell = cell;
@@ -324,7 +327,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 struct FsmOptPass : public Pass {
 	FsmOptPass() : Pass("fsm_opt", "optimize finite state machines") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -335,17 +338,15 @@ struct FsmOptPass : public Pass {
 		log("combination with the 'opt_clean' pass (see also 'help fsm').\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing FSM_OPT pass (simple optimizations of FSMs).\n");
 		extra_args(args, 1, design);
 
-		for (auto &mod_it : design->modules_) {
-			if (design->selected(mod_it.second))
-				for (auto &cell_it : mod_it.second->cells_)
-					if (cell_it.second->type == "$fsm" && design->selected(mod_it.second, cell_it.second))
-						FsmData::optimize_fsm(cell_it.second, mod_it.second);
-		}
+		for (auto mod : design->selected_modules())
+			for (auto cell : mod->selected_cells())
+				if (cell->type == ID($fsm))
+					FsmData::optimize_fsm(cell, mod);
 	}
 } FsmOptPass;
 

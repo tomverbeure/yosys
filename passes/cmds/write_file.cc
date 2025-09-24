@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2014  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2014  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2014  Johann Glaser <Johann.Glaser@gmx.at>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -19,13 +19,19 @@
  */
 
 #include "kernel/yosys.h"
+#include "kernel/log_help.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 struct WriteFileFrontend : public Frontend {
 	WriteFileFrontend() : Frontend("=write_file", "write a text to a file") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -44,7 +50,7 @@ struct WriteFileFrontend : public Frontend {
 		log("    EOT\n");
 		log("\n");
 	}
-	void execute(std::istream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design*) YS_OVERRIDE
+	void execute(std::istream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design*) override
 	{
 		bool append_mode = false;
 		std::string output_filename;
@@ -62,7 +68,7 @@ struct WriteFileFrontend : public Frontend {
 		if (argidx < args.size() && args[argidx].rfind("-", 0) != 0)
 			output_filename = args[argidx++];
 		else
-			log_cmd_error("Missing putput filename.\n");
+			log_cmd_error("Missing output filename.\n");
 
 		extra_args(f, filename, args, argidx);
 

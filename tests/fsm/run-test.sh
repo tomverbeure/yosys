@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # run this test many times:
 # time bash -c 'for ((i=0; i<100; i++)); do echo "-- $i --"; bash run-test.sh || exit 1; done'
@@ -6,7 +6,7 @@
 set -e
 
 OPTIND=1
-count=100
+count=50
 seed=""    # default to no seed specified
 while getopts "c:S:" opt
 do

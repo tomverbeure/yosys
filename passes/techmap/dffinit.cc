@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -19,13 +19,14 @@
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
+#include "kernel/ffinit.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 struct DffinitPass : public Pass {
 	DffinitPass() : Pass("dffinit", "set INIT param on FF cells") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -54,7 +55,7 @@ struct DffinitPass : public Pass {
 		log("        the already defined initial value.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing DFFINIT pass (set INIT param on FF cells).\n");
 
@@ -94,28 +95,10 @@ struct DffinitPass : public Pass {
 		for (auto module : design->selected_modules())
 		{
 			SigMap sigmap(module);
-			dict<SigBit, State> init_bits;
-			pool<SigBit> cleanup_bits;
-			pool<SigBit> used_bits;
-
-			for (auto wire : module->selected_wires()) {
-				if (wire->attributes.count("\\init")) {
-					Const value = wire->attributes.at("\\init");
-					for (int i = 0; i < min(GetSize(value), GetSize(wire)); i++)
-						init_bits[sigmap(SigBit(wire, i))] = value[i];
-				}
-				if (wire->port_output)
-					for (auto bit : sigmap(wire))
-						used_bits.insert(bit);
-			}
+			FfInitVals initvals(&sigmap, module);
 
 			for (auto cell : module->selected_cells())
 			{
-				for (auto it : cell->connections())
-					if (!cell->known() || cell->input(it.first))
-						for (auto bit : sigmap(it.second))
-							used_bits.insert(bit);
-
 				if (ff_types.count(cell->type) == 0)
 					continue;
 
@@ -130,17 +113,18 @@ struct DffinitPass : public Pass {
 					if (cell->hasParam(it.second))
 						value = cell->getParam(it.second);
 
+					Const initval = initvals(sig);
+					initvals.remove_init(sig);
 					for (int i = 0; i < GetSize(sig); i++) {
-						if (init_bits.count(sig[i]) == 0)
+						if (initval[i] == State::Sx)
 							continue;
-						while (GetSize(value.bits) <= i)
-							value.bits.push_back(State::S0);
-						if (noreinit && value.bits[i] != State::Sx && value.bits[i] != init_bits.at(sig[i]))
+						if (GetSize(value) <= i)
+							value.resize(i + 1, State::S0);
+						if (noreinit && value[i] != State::Sx && value[i] != initval[i])
 							log_error("Trying to assign a different init value for %s.%s.%s which technically "
 									"have a conflicted init value.\n",
 									log_id(module), log_id(cell), log_id(it.second));
-						value.bits[i] = init_bits.at(sig[i]);
-						cleanup_bits.insert(sig[i]);
+						value.set(i, initval[i]);
 					}
 
 					if (highlow_mode && GetSize(value) != 0) {
@@ -153,28 +137,13 @@ struct DffinitPass : public Pass {
 							value = Const(low_string);
 					}
 
-					log("Setting %s.%s.%s (port=%s, net=%s) to %s.\n", log_id(module), log_id(cell), log_id(it.second),
-							log_id(it.first), log_signal(sig), log_signal(value));
-					cell->setParam(it.second, value);
+					if (value.size() != 0) {
+						log("Setting %s.%s.%s (port=%s, net=%s) to %s.\n", log_id(module), log_id(cell), log_id(it.second),
+								log_id(it.first), log_signal(sig), log_signal(value));
+						cell->setParam(it.second, value);
+					}
 				}
 			}
-
-			for (auto wire : module->selected_wires())
-				if (wire->attributes.count("\\init")) {
-					Const &value = wire->attributes.at("\\init");
-					bool do_cleanup = true;
-					for (int i = 0; i < min(GetSize(value), GetSize(wire)); i++) {
-						SigBit bit = sigmap(SigBit(wire, i));
-						if (cleanup_bits.count(bit) || !used_bits.count(bit))
-							value[i] = State::Sx;
-						else if (value[i] != State::Sx)
-							do_cleanup = false;
-					}
-					if (do_cleanup) {
-						log("Removing init attribute from wire %s.%s.\n", log_id(module), log_id(wire));
-						wire->attributes.erase("\\init");
-					}
-				}
 		}
 	}
 } DffinitPass;

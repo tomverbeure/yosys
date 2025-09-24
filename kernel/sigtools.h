@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -29,7 +29,11 @@ struct SigPool
 	struct bitDef_t : public std::pair<RTLIL::Wire*, int> {
 		bitDef_t() : std::pair<RTLIL::Wire*, int>(NULL, 0) { }
 		bitDef_t(const RTLIL::SigBit &bit) : std::pair<RTLIL::Wire*, int>(bit.wire, bit.offset) { }
-		unsigned int hash() const { return first->name.hash() + second; }
+		[[nodiscard]] Hasher hash_into(Hasher h) const {
+			h.eat(first->name);
+			h.eat(second);
+			return h;
+		}
 	};
 
 	pool<bitDef_t> bits;
@@ -39,7 +43,7 @@ struct SigPool
 		bits.clear();
 	}
 
-	void add(RTLIL::SigSpec sig)
+	void add(const RTLIL::SigSpec &sig)
 	{
 		for (auto &bit : sig)
 			if (bit.wire != NULL)
@@ -52,7 +56,7 @@ struct SigPool
 			bits.insert(bit);
 	}
 
-	void del(RTLIL::SigSpec sig)
+	void del(const RTLIL::SigSpec &sig)
 	{
 		for (auto &bit : sig)
 			if (bit.wire != NULL)
@@ -65,7 +69,7 @@ struct SigPool
 			bits.erase(bit);
 	}
 
-	void expand(RTLIL::SigSpec from, RTLIL::SigSpec to)
+	void expand(const RTLIL::SigSpec &from, const RTLIL::SigSpec &to)
 	{
 		log_assert(GetSize(from) == GetSize(to));
 		for (int i = 0; i < GetSize(from); i++) {
@@ -75,16 +79,16 @@ struct SigPool
 		}
 	}
 
-	RTLIL::SigSpec extract(RTLIL::SigSpec sig)
+	RTLIL::SigSpec extract(const RTLIL::SigSpec &sig) const
 	{
 		RTLIL::SigSpec result;
 		for (auto &bit : sig)
 			if (bit.wire != NULL && bits.count(bit))
-				result.append_bit(bit);
+				result.append(bit);
 		return result;
 	}
 
-	RTLIL::SigSpec remove(RTLIL::SigSpec sig)
+	RTLIL::SigSpec remove(const RTLIL::SigSpec &sig) const
 	{
 		RTLIL::SigSpec result;
 		for (auto &bit : sig)
@@ -93,12 +97,12 @@ struct SigPool
 		return result;
 	}
 
-	bool check(RTLIL::SigBit bit)
+	bool check(const RTLIL::SigBit &bit) const
 	{
 		return bit.wire != NULL && bits.count(bit);
 	}
 
-	bool check_any(RTLIL::SigSpec sig)
+	bool check_any(const RTLIL::SigSpec &sig) const
 	{
 		for (auto &bit : sig)
 			if (bit.wire != NULL && bits.count(bit))
@@ -106,7 +110,7 @@ struct SigPool
 		return false;
 	}
 
-	bool check_all(RTLIL::SigSpec sig)
+	bool check_all(const RTLIL::SigSpec &sig) const
 	{
 		for (auto &bit : sig)
 			if (bit.wire != NULL && bits.count(bit) == 0)
@@ -114,14 +118,14 @@ struct SigPool
 		return true;
 	}
 
-	RTLIL::SigSpec export_one()
+	RTLIL::SigSpec export_one() const
 	{
 		for (auto &bit : bits)
 			return RTLIL::SigSpec(bit.first, bit.second);
 		return RTLIL::SigSpec();
 	}
 
-	RTLIL::SigSpec export_all()
+	RTLIL::SigSpec export_all() const
 	{
 		pool<RTLIL::SigBit> sig;
 		for (auto &bit : bits)
@@ -135,13 +139,19 @@ struct SigPool
 	}
 };
 
-template <typename T, class Compare = std::less<T>>
+template <typename T, class Compare = void>
 struct SigSet
 {
+	static_assert(!std::is_same<Compare,void>::value, "Default value for `Compare' class not found for SigSet<T>. Please specify.");
+
 	struct bitDef_t : public std::pair<RTLIL::Wire*, int> {
 		bitDef_t() : std::pair<RTLIL::Wire*, int>(NULL, 0) { }
 		bitDef_t(const RTLIL::SigBit &bit) : std::pair<RTLIL::Wire*, int>(bit.wire, bit.offset) { }
-		unsigned int hash() const { return first->name.hash() + second; }
+		[[nodiscard]] Hasher hash_into(Hasher h) const {
+			h.eat(first->name);
+			h.eat(second);
+			return h;
+		}
 	};
 
 	dict<bitDef_t, std::set<T, Compare>> bits;
@@ -151,67 +161,67 @@ struct SigSet
 		bits.clear();
 	}
 
-	void insert(RTLIL::SigSpec sig, T data)
+	void insert(const RTLIL::SigSpec &sig, T data)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL)
 				bits[bit].insert(data);
 	}
 
-	void insert(RTLIL::SigSpec sig, const std::set<T> &data)
+	void insert(const RTLIL::SigSpec& sig, const std::set<T> &data)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL)
 				bits[bit].insert(data.begin(), data.end());
 	}
 
-	void erase(RTLIL::SigSpec sig)
+	void erase(const RTLIL::SigSpec& sig)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL)
 				bits[bit].clear();
 	}
 
-	void erase(RTLIL::SigSpec sig, T data)
+	void erase(const RTLIL::SigSpec &sig, T data)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL)
 				bits[bit].erase(data);
 	}
 
-	void erase(RTLIL::SigSpec sig, const std::set<T> &data)
+	void erase(const RTLIL::SigSpec &sig, const std::set<T> &data)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL)
 				bits[bit].erase(data.begin(), data.end());
 	}
 
-	void find(RTLIL::SigSpec sig, std::set<T> &result)
+	void find(const RTLIL::SigSpec &sig, std::set<T> &result)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL) {
 				auto &data = bits[bit];
 				result.insert(data.begin(), data.end());
 			}
 	}
 
-	void find(RTLIL::SigSpec sig, pool<T> &result)
+	void find(const RTLIL::SigSpec &sig, pool<T> &result)
 	{
-		for (auto &bit : sig)
+		for (const auto &bit : sig)
 			if (bit.wire != NULL) {
 				auto &data = bits[bit];
 				result.insert(data.begin(), data.end());
 			}
 	}
 
-	std::set<T> find(RTLIL::SigSpec sig)
+	std::set<T> find(const RTLIL::SigSpec &sig)
 	{
 		std::set<T> result;
 		find(sig, result);
 		return result;
 	}
 
-	bool has(RTLIL::SigSpec sig)
+	bool has(const RTLIL::SigSpec &sig)
 	{
 		for (auto &bit : sig)
 			if (bit.wire != NULL && bits.count(bit))
@@ -220,73 +230,18 @@ struct SigSet
 	}
 };
 
-struct SigMap
+template<typename T>
+class SigSet<T, typename std::enable_if<!std::is_pointer<T>::value>::type> : public SigSet<T, std::less<T>> {};
+template<typename T>
+using sort_by_name_id_guard = typename std::enable_if<std::is_same<T,RTLIL::Cell*>::value>::type;
+template<typename T>
+class SigSet<T, sort_by_name_id_guard<T>> : public SigSet<T, RTLIL::sort_by_name_id<typename std::remove_pointer<T>::type>> {};
+
+struct SigMapView
 {
 	mfp<SigBit> database;
 
-	SigMap(RTLIL::Module *module = NULL)
-	{
-		if (module != NULL)
-			set(module);
-	}
-
-	void swap(SigMap &other)
-	{
-		database.swap(other.database);
-	}
-
-	void clear()
-	{
-		database.clear();
-	}
-
-	void set(RTLIL::Module *module)
-	{
-		int bitcount = 0;
-		for (auto &it : module->connections())
-			bitcount += it.first.size();
-
-		database.clear();
-		database.reserve(bitcount);
-
-		for (auto &it : module->connections())
-			add(it.first, it.second);
-	}
-
-	void add(RTLIL::SigSpec from, RTLIL::SigSpec to)
-	{
-		log_assert(GetSize(from) == GetSize(to));
-
-		for (int i = 0; i < GetSize(from); i++)
-		{
-			int bfi = database.lookup(from[i]);
-			int bti = database.lookup(to[i]);
-
-			const RTLIL::SigBit &bf = database[bfi];
-			const RTLIL::SigBit &bt = database[bti];
-
-			if (bf.wire || bt.wire)
-			{
-				database.imerge(bfi, bti);
-
-				if (bf.wire == nullptr)
-					database.ipromote(bfi);
-
-				if (bt.wire == nullptr)
-					database.ipromote(bti);
-			}
-		}
-	}
-
-	void add(RTLIL::SigSpec sig)
-	{
-		for (auto &bit : sig) {
-			RTLIL::SigBit b = database.find(bit);
-			if (b.wire != nullptr)
-				database.promote(bit);
-		}
-	}
-
+	// Modify bit to its representative
 	void apply(RTLIL::SigBit &bit) const
 	{
 		bit = database.find(bit);
@@ -316,14 +271,198 @@ struct SigMap
 		apply(sig);
 		return sig;
 	}
+};
 
+/**
+ * SigMap wraps a union-find "database"
+ * to map SigBits of a module to canonical representative SigBits.
+ * SigBits that are connected share a set in the underlying database.
+ * If a SigBit has a const state (impl: bit.wire is nullptr),
+ * it's promoted to a representative.
+ */
+struct SigMap final : public SigMapView
+{
+	SigMap(RTLIL::Module *module = NULL)
+	{
+		if (module != NULL)
+			set(module);
+	}
+
+	void swap(SigMap &other)
+	{
+		database.swap(other.database);
+	}
+
+	void clear()
+	{
+		database.clear();
+	}
+
+	// Rebuild SigMap for all connections in module
+	void set(RTLIL::Module *module)
+	{
+		int bitcount = 0;
+		for (auto &it : module->connections())
+			bitcount += it.first.size();
+
+		database.clear();
+		database.reserve(bitcount);
+
+		for (auto &it : module->connections())
+			add(it.first, it.second);
+	}
+
+	// Add connections from "from" to "to", bit-by-bit
+	void add(const RTLIL::SigSpec& from, const RTLIL::SigSpec& to)
+	{
+		log_assert(GetSize(from) == GetSize(to));
+
+		for (int i = 0; i < GetSize(from); i++)
+		{
+			int bfi = database.lookup(from[i]);
+			int bti = database.lookup(to[i]);
+
+			const RTLIL::SigBit &bf = database[bfi];
+			const RTLIL::SigBit &bt = database[bti];
+
+			if (bf.wire || bt.wire)
+			{
+				database.imerge(bfi, bti);
+
+				if (bf.wire == nullptr)
+					database.ipromote(bfi);
+
+				if (bt.wire == nullptr)
+					database.ipromote(bti);
+			}
+		}
+	}
+
+	// Add sig as disconnected from anything
+	void add(const RTLIL::SigBit &bit)
+	{
+		const auto &b = database.find(bit);
+		if (b.wire != nullptr)
+			database.promote(bit);
+	}
+
+	void add(const RTLIL::SigSpec &sig)
+	{
+		for (const auto &bit : sig)
+			add(bit);
+	}
+
+	inline void add(Wire *wire) { return add(RTLIL::SigSpec(wire)); }
+
+	// All non-const bits
 	RTLIL::SigSpec allbits() const
 	{
 		RTLIL::SigSpec sig;
-		for (auto &bit : database)
+		for (const auto &bit : database)
 			if (bit.wire != nullptr)
 				sig.append(bit);
 		return sig;
+	}
+};
+
+/**
+ * SiValgMap wraps a union-find "database" to map SigBits of a module to
+ * canonical representative SigBits plus some optional Val value associated with the bits.
+ * Val has a commutative, associative, idempotent operator|=, a default constructor
+ * which constructs an identity element, and a copy constructor.
+ * SigBits that are connected share a set in the underlying database;
+ * the associated value is the "sum" of all the values associated with the contributing bits.
+ * If any of the SigBits in a set are a constant, the canonical SigBit is a constant.
+ */
+template <class Val>
+struct SigValMap final : public SigMapView
+{
+	dict<SigBit, Val> values;
+
+	void swap(SigValMap<Val> &other)
+	{
+		database.swap(other.database);
+		values.swap(other.values);
+	}
+
+	void clear()
+	{
+		database.clear();
+		values.clear();
+	}
+
+	// Rebuild SigMap for all connections in module
+	void set(RTLIL::Module *module)
+	{
+		int bitcount = 0;
+		for (auto &it : module->connections())
+			bitcount += it.first.size();
+
+		database.clear();
+		values.clear();
+		database.reserve(bitcount);
+
+		for (auto &it : module->connections())
+			add(it.first, it.second);
+	}
+
+	// Add connections from "from" to "to", bit-by-bit.
+	void add(const RTLIL::SigSpec& from, const RTLIL::SigSpec& to)
+	{
+		log_assert(GetSize(from) == GetSize(to));
+
+		for (int i = 0; i < GetSize(from); i++)
+		{
+			int bfi = database.lookup(from[i]);
+			int bti = database.lookup(to[i]);
+			if (bfi == bti) {
+				continue;
+			}
+
+			const RTLIL::SigBit &bf = database[bfi];
+			const RTLIL::SigBit &bt = database[bti];
+			if (bf.wire == nullptr) {
+				// bf is constant so make it the canonical representative.
+				database.imerge(bti, bfi);
+				merge_value(bt, bf);
+			} else {
+				// Make bt the canonical representative.
+				database.imerge(bfi, bti);
+				merge_value(bf, bt);
+			}
+		}
+	}
+
+	void addVal(const RTLIL::SigBit &bit, const Val &val)
+	{
+		values[database.find(bit)] |= val;
+	}
+
+	void addVal(const RTLIL::SigSpec &sig, const Val &val)
+	{
+		for (const auto &bit : sig)
+			addVal(bit, val);
+	}
+
+	Val apply_and_get_value(RTLIL::SigBit &bit) const
+	{
+		bit = database.find(bit);
+		auto it = values.find(bit);
+		return it == values.end() ? Val() : it->second;
+	}
+
+private:
+	void merge_value(const RTLIL::SigBit &from, const RTLIL::SigBit &to)
+	{
+		auto it = values.find(from);
+		if (it == values.end()) {
+			return;
+		}
+		// values[to] could resize the underlying `entries` so
+		// finish using `it` first.
+		Val v = it->second;
+		values.erase(it);
+		values[to] |= v;
 	}
 };
 

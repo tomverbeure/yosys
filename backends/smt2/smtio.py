@@ -1,7 +1,7 @@
 #
 # yosys -- Yosys Open SYnthesis Suite
 #
-# Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+# Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
 #
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -16,11 +16,11 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
-import sys, re, os, signal
+import sys, re, os, signal, json
 import subprocess
 if os.name == "posix":
     import resource
-from copy import deepcopy
+from copy import copy
 from select import select
 from time import time
 from queue import Queue, Empty
@@ -39,11 +39,15 @@ if os.name == "posix":
         smtio_stacksize = 128 * 1024 * 1024
         if os.uname().sysname == "Darwin":
             # MacOS has rather conservative stack limits
-            smtio_stacksize = 16 * 1024 * 1024
+            smtio_stacksize = 8 * 1024 * 1024
         if current_rlimit_stack[1] != resource.RLIM_INFINITY:
             smtio_stacksize = min(smtio_stacksize, current_rlimit_stack[1])
         if current_rlimit_stack[0] < smtio_stacksize:
-            resource.setrlimit(resource.RLIMIT_STACK, (smtio_stacksize, current_rlimit_stack[1]))
+            try:
+                resource.setrlimit(resource.RLIMIT_STACK, (smtio_stacksize, current_rlimit_stack[1]))
+            except ValueError:
+                # couldn't get more stack, just run with what we have
+                pass
 
 
 # currently running solvers (so we can kill them)
@@ -75,6 +79,20 @@ def except_hook(exctype, value, traceback):
 sys.excepthook = except_hook
 
 
+def recursion_helper(iteration, *request):
+    stack = [iteration(*request)]
+
+    while stack:
+        top = stack.pop()
+        try:
+            request = next(top)
+        except StopIteration:
+            continue
+
+        stack.append(top)
+        stack.append(iteration(*request))
+
+
 hex_dict = {
     "0": "0000", "1": "0001", "2": "0010", "3": "0011",
     "4": "0100", "5": "0101", "6": "0110", "7": "0111",
@@ -96,12 +114,16 @@ class SmtModInfo:
         self.clocks = dict()
         self.cells = dict()
         self.asserts = dict()
+        self.assumes = dict()
         self.covers = dict()
+        self.maximize = set()
+        self.minimize = set()
         self.anyconsts = dict()
         self.anyseqs = dict()
         self.allconsts = dict()
         self.allseqs = dict()
         self.asize = dict()
+        self.witness = []
 
 
 class SmtIo:
@@ -115,8 +137,12 @@ class SmtIo:
         self.logic_bv = True
         self.logic_dt = False
         self.forall = False
+        self.timeout = 0
         self.produce_models = True
+        self.recheck = False
         self.smt2cache = [list()]
+        self.smt2_options = dict()
+        self.smt2_assumptions = dict()
         self.p = None
         self.p_index = solvers_index
         solvers_index += 1
@@ -129,10 +155,12 @@ class SmtIo:
             self.debug_file = opts.debug_file
             self.dummy_file = opts.dummy_file
             self.timeinfo = opts.timeinfo
+            self.timeout = opts.timeout
             self.unroll = opts.unroll
             self.noincr = opts.noincr
             self.info_stmts = opts.info_stmts
             self.nocomments = opts.nocomments
+            self.smt2_options.update(opts.smt2_options)
 
         else:
             self.solver = "yices"
@@ -141,6 +169,7 @@ class SmtIo:
             self.debug_file = None
             self.dummy_file = None
             self.timeinfo = os.name != "nt"
+            self.timeout = 0
             self.unroll = False
             self.noincr = False
             self.info_stmts = list()
@@ -166,29 +195,46 @@ class SmtIo:
             self.unroll = False
 
         if self.solver == "yices":
+            if self.forall:
+                self.noincr = True
+
             if self.noincr:
                 self.popen_vargs = ['yices-smt2'] + self.solver_opts
             else:
                 self.popen_vargs = ['yices-smt2', '--incremental'] + self.solver_opts
+            if self.timeout != 0:
+                self.popen_vargs.append('-t')
+                self.popen_vargs.append('%d' % self.timeout);
 
         if self.solver == "z3":
             self.popen_vargs = ['z3', '-smt2', '-in'] + self.solver_opts
+            if self.timeout != 0:
+                self.popen_vargs.append('-T:%d' % self.timeout);
 
-        if self.solver == "cvc4":
+        if self.solver in ["cvc4", "cvc5"]:
+            self.recheck = True
             if self.noincr:
-                self.popen_vargs = ['cvc4', '--lang', 'smt2.6' if self.logic_dt else 'smt2'] + self.solver_opts
+                self.popen_vargs = [self.solver, '--lang', 'smt2.6' if self.logic_dt else 'smt2'] + self.solver_opts
             else:
-                self.popen_vargs = ['cvc4', '--incremental', '--lang', 'smt2.6' if self.logic_dt else 'smt2'] + self.solver_opts
+                self.popen_vargs = [self.solver, '--incremental', '--lang', 'smt2.6' if self.logic_dt else 'smt2'] + self.solver_opts
+            if self.timeout != 0:
+                self.popen_vargs.append('--tlimit=%d000' % self.timeout);
 
         if self.solver == "mathsat":
             self.popen_vargs = ['mathsat'] + self.solver_opts
+            if self.timeout != 0:
+                print('timeout option is not supported for mathsat.')
+                sys.exit(1)
 
-        if self.solver == "boolector":
+        if self.solver in ["boolector", "bitwuzla"]:
             if self.noincr:
-                self.popen_vargs = ['boolector', '--smt2'] + self.solver_opts
+                self.popen_vargs = [self.solver, '--smt2'] + self.solver_opts
             else:
-                self.popen_vargs = ['boolector', '--smt2', '-i'] + self.solver_opts
+                self.popen_vargs = [self.solver, '--smt2', '-i'] + self.solver_opts
             self.unroll = True
+            if self.timeout != 0:
+                print('timeout option is not supported for %s.' % self.solver)
+                sys.exit(1)
 
         if self.solver == "abc":
             if len(self.solver_opts) > 0:
@@ -198,6 +244,9 @@ class SmtIo:
             self.logic_ax = False
             self.unroll = True
             self.noincr = True
+            if self.timeout != 0:
+                print('timeout option is not supported for abc.')
+                sys.exit(1)
 
         if self.solver == "dummy":
             assert self.dummy_file is not None
@@ -213,6 +262,7 @@ class SmtIo:
             self.logic_uf = False
             self.unroll_idcnt = 0
             self.unroll_buffer = ""
+            self.unroll_level = 0
             self.unroll_sorts = set()
             self.unroll_objs = set()
             self.unroll_decls = dict()
@@ -226,6 +276,7 @@ class SmtIo:
             if self.logic_uf: self.logic += "UF"
             if self.logic_bv: self.logic += "BV"
             if self.logic_dt: self.logic = "ALL"
+            if self.solver == "yices" and self.forall: self.logic = "BV"
 
         self.setup_done = True
 
@@ -235,7 +286,20 @@ class SmtIo:
         if self.produce_models:
             self.write("(set-option :produce-models true)")
 
+        #See the SMT-LIB Standard, Section 4.1.7
+        modestart_options = [":global-declarations", ":interactive-mode", ":produce-assertions", ":produce-assignments", ":produce-models", ":produce-proofs", ":produce-unsat-assumptions", ":produce-unsat-cores", ":random-seed"]
+        for key, val in self.smt2_options.items():
+            if key in modestart_options:
+                self.write("(set-option {} {})".format(key, val))
+
         self.write("(set-logic %s)" % self.logic)
+
+        if self.forall and self.solver == "yices":
+            self.write("(set-option :yices-ef-max-iters 1000000000)")
+
+        for key, val in self.smt2_options.items():
+            if key not in modestart_options:
+                self.write("(set-option {} {})".format(key, val))
 
     def timestamp(self):
         secs = int(time() - self.start_time)
@@ -251,17 +315,29 @@ class SmtIo:
         return stmt
 
     def unroll_stmt(self, stmt):
-        if not isinstance(stmt, list):
-            return stmt
+        result = []
+        recursion_helper(self._unroll_stmt_into, stmt, result)
+        return result.pop()
 
-        stmt = [self.unroll_stmt(s) for s in stmt]
+    def _unroll_stmt_into(self, stmt, output, depth=128):
+        if not isinstance(stmt, list):
+            output.append(stmt)
+            return
+
+        new_stmt = []
+        for s in stmt:
+            if depth:
+                yield from self._unroll_stmt_into(s, new_stmt, depth - 1)
+            else:
+                yield s, new_stmt
+        stmt = new_stmt
 
         if len(stmt) >= 2 and not isinstance(stmt[0], list) and stmt[0] in self.unroll_decls:
             assert stmt[1] in self.unroll_objs
 
             key = tuple(stmt)
             if key not in self.unroll_cache:
-                decl = deepcopy(self.unroll_decls[key[0]])
+                decl = copy(self.unroll_decls[key[0]])
 
                 self.unroll_cache[key] = "|UNROLL#%d|" % self.unroll_idcnt
                 decl[1] = self.unroll_cache[key]
@@ -283,16 +359,23 @@ class SmtIo:
                     decl[2] = list()
 
                 if len(decl) > 0:
-                    decl = self.unroll_stmt(decl)
+                    tmp = []
+                    if depth:
+                        yield from self._unroll_stmt_into(decl, tmp, depth - 1)
+                    else:
+                        yield decl, tmp
+
+                    decl = tmp.pop()
                     self.write(self.unparse(decl), unroll=False)
 
-            return self.unroll_cache[key]
+            output.append(self.unroll_cache[key])
+            return
 
-        return stmt
+        output.append(stmt)
 
     def p_thread_main(self):
         while True:
-            data = self.p.stdout.readline().decode("ascii")
+            data = self.p.stdout.readline().decode("utf-8")
             if data == "": break
             self.p_queue.put(data)
         self.p_queue.put("")
@@ -300,7 +383,11 @@ class SmtIo:
 
     def p_open(self):
         assert self.p is None
-        self.p = subprocess.Popen(self.popen_vargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            self.p = subprocess.Popen(self.popen_vargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except FileNotFoundError:
+            print("%s SMT Solver '%s' not found in path." % (self.timestamp(), self.popen_vargs[0]), flush=True)
+            sys.exit(1)
         running_solvers[self.p_index] = self.p
         self.p_running = True
         self.p_next = None
@@ -310,7 +397,7 @@ class SmtIo:
 
     def p_write(self, data, flush):
         assert self.p is not None
-        self.p.stdin.write(bytes(data, "ascii"))
+        self.p.stdin.write(bytes(data, "utf-8"))
         if flush: self.p.stdin.flush()
 
     def p_read(self):
@@ -360,16 +447,30 @@ class SmtIo:
             stmt = re.sub(r" *;.*", "", stmt)
             if stmt == "": return
 
-        if unroll and self.unroll:
-            stmt = self.unroll_buffer + stmt
-            self.unroll_buffer = ""
+        recheck = None
 
+        if self.solver != "dummy":
+            if self.noincr:
+                # Don't close the solver yet, if we're just unrolling definitions
+                # required for a (get-...) statement
+                if self.p is not None and not stmt.startswith("(get-") and unroll:
+                    self.p_close()
+
+        if unroll and self.unroll:
             s = re.sub(r"\|[^|]*\|", "", stmt)
-            if s.count("(") != s.count(")"):
-                self.unroll_buffer = stmt + " "
+            self.unroll_level += s.count("(") - s.count(")")
+            if self.unroll_level > 0:
+                self.unroll_buffer += stmt
+                self.unroll_buffer += " "
                 return
+            else:
+                stmt = self.unroll_buffer + stmt
+                self.unroll_buffer = ""
 
             s = self.parse(stmt)
+
+            if self.recheck and s and s[0].startswith("get-"):
+                recheck = self.unroll_idcnt
 
             if self.debug_print:
                 print("-> %s" % s)
@@ -396,12 +497,15 @@ class SmtIo:
 
             stmt = self.unparse(self.unroll_stmt(s))
 
+            if recheck is not None and recheck != self.unroll_idcnt:
+                self.check_sat(["sat"])
+
             if stmt == "(push 1)":
                 self.unroll_stack.append((
-                    deepcopy(self.unroll_sorts),
-                    deepcopy(self.unroll_objs),
-                    deepcopy(self.unroll_decls),
-                    deepcopy(self.unroll_cache),
+                    copy(self.unroll_sorts),
+                    copy(self.unroll_objs),
+                    copy(self.unroll_decls),
+                    copy(self.unroll_cache),
                 ))
 
             if stmt == "(pop 1)":
@@ -416,8 +520,6 @@ class SmtIo:
 
         if self.solver != "dummy":
             if self.noincr:
-                if self.p is not None and not stmt.startswith("(get-"):
-                    self.p_close()
                 if stmt == "(push 1)":
                     self.smt2cache.append(list())
                 elif stmt == "(pop 1)":
@@ -434,6 +536,9 @@ class SmtIo:
             return
 
         fields = stmt.split()
+
+        if fields[1] == "yosys-smt2-solver-option":
+            self.smt2_options[fields[2]] = fields[3]
 
         if fields[1] == "yosys-smt2-nomem":
             if self.logic is None:
@@ -489,10 +594,28 @@ class SmtIo:
                     self.modinfo[self.curmod].clocks[fields[2]] = "event"
 
         if fields[1] == "yosys-smt2-assert":
-            self.modinfo[self.curmod].asserts["%s_a %s" % (self.curmod, fields[2])] = fields[3]
+            if len(fields) > 4:
+                self.modinfo[self.curmod].asserts["%s_a %s" % (self.curmod, fields[2])] = f'{fields[4]} ({fields[3]})'
+            else:
+                self.modinfo[self.curmod].asserts["%s_a %s" % (self.curmod, fields[2])] = fields[3]
 
         if fields[1] == "yosys-smt2-cover":
-            self.modinfo[self.curmod].covers["%s_c %s" % (self.curmod, fields[2])] = fields[3]
+            if len(fields) > 4:
+                self.modinfo[self.curmod].covers["%s_c %s" % (self.curmod, fields[2])] = f'{fields[4]} ({fields[3]})'
+            else:
+                self.modinfo[self.curmod].covers["%s_c %s" % (self.curmod, fields[2])] = fields[3]
+
+        if fields[1] == "yosys-smt2-assume":
+            if len(fields) > 4:
+                self.modinfo[self.curmod].assumes["%s_u %s" % (self.curmod, fields[2])] = f'{fields[4]} ({fields[3]})'
+            else:
+                self.modinfo[self.curmod].assumes["%s_u %s" % (self.curmod, fields[2])] = fields[3]
+
+        if fields[1] == "yosys-smt2-maximize":
+            self.modinfo[self.curmod].maximize.add(fields[2])
+
+        if fields[1] == "yosys-smt2-minimize":
+            self.modinfo[self.curmod].minimize.add(fields[2])
 
         if fields[1] == "yosys-smt2-anyconst":
             self.modinfo[self.curmod].anyconsts[fields[2]] = (fields[4], None if len(fields) <= 5 else fields[5])
@@ -509,6 +632,11 @@ class SmtIo:
         if fields[1] == "yosys-smt2-allseq":
             self.modinfo[self.curmod].allseqs[fields[2]] = (fields[4], None if len(fields) <= 5 else fields[5])
             self.modinfo[self.curmod].asize[fields[2]] = int(fields[3])
+
+        if fields[1] == "yosys-smt2-witness":
+            data = json.loads(stmt.split(None, 2)[2])
+            if data.get("type") in ["cell", "mem", "posedge", "negedge", "input", "reg", "init", "seq", "blackbox"]:
+                self.modinfo[self.curmod].witness.append(data)
 
     def hiernets(self, top, regs_only=False):
         def hiernets_worker(nets, mod, cursor):
@@ -581,6 +709,57 @@ class SmtIo:
         hiermems_worker(mems, top, [])
         return mems
 
+    def hierwitness(self, top, allregs=False, blackbox=True):
+        init_witnesses = []
+        seq_witnesses = []
+        clk_witnesses = []
+        mem_witnesses = []
+
+        def absolute(path, cursor, witness):
+            return {
+                **witness,
+                "path": path + tuple(witness["path"]),
+                "smtpath": cursor + [witness["smtname"]],
+            }
+
+        for witness in self.modinfo[top].witness:
+            if witness["type"] == "input":
+                seq_witnesses.append(absolute((), [], witness))
+            if witness["type"] in ("posedge", "negedge"):
+                clk_witnesses.append(absolute((), [], witness))
+
+        init_types = ["init"]
+        if allregs:
+            init_types.append("reg")
+
+        seq_types = ["seq"]
+        if blackbox:
+            seq_types.append("blackbox")
+
+        def worker(mod, path, cursor):
+            cell_paths = {}
+            for witness in self.modinfo[mod].witness:
+                if witness["type"] in init_types:
+                    init_witnesses.append(absolute(path, cursor, witness))
+                if witness["type"] in seq_types:
+                    seq_witnesses.append(absolute(path, cursor, witness))
+                if witness["type"] == "mem":
+                    if allregs and not witness["rom"]:
+                        width, size = witness["width"], witness["size"]
+                        witness = {**witness, "uninitialized": [{"width": width * size, "offset": 0}]}
+                    if not witness["uninitialized"]:
+                        continue
+
+                    mem_witnesses.append(absolute(path, cursor, witness))
+                if witness["type"] == "cell":
+                    cell_paths[witness["smtname"]] = tuple(witness["path"])
+
+            for cellname, celltype in sorted(self.modinfo[mod].cells.items()):
+                worker(celltype, path + cell_paths.get(cellname, ("?" + cellname,)), cursor + [cellname])
+
+        worker(top, (), [])
+        return init_witnesses, seq_witnesses, clk_witnesses, mem_witnesses
+
     def read(self):
         stmt = []
         count_brackets = 0
@@ -614,9 +793,14 @@ class SmtIo:
 
         return stmt
 
-    def check_sat(self):
+    def check_sat(self, expected=["sat", "unsat", "unknown", "timeout", "interrupted"]):
+        if self.smt2_assumptions:
+            assume_exprs = " ".join(self.smt2_assumptions.values())
+            check_stmt = f"(check-sat-assuming ({assume_exprs}))"
+        else:
+            check_stmt = "(check-sat)"
         if self.debug_print:
-            print("> (check-sat)")
+            print(f"> {check_stmt}")
         if self.debug_file and not self.nocomments:
             print("; running check-sat..", file=self.debug_file)
             self.debug_file.flush()
@@ -630,11 +814,11 @@ class SmtIo:
                     for cache_stmt in cache_ctx:
                         self.p_write(cache_stmt + "\n", False)
 
-            self.p_write("(check-sat)\n", True)
+            self.p_write(f"{check_stmt}\n", True)
 
             if self.timeinfo:
                 i = 0
-                s = "/-\|"
+                s = r"/-\|"
 
                 count = 0
                 num_bs = 0
@@ -688,14 +872,20 @@ class SmtIo:
                     if msg is not None:
                         print("%s waiting for solver (%s)" % (self.timestamp(), msg), flush=True)
 
-        result = self.read()
+        if self.forall:
+            result = self.read()
+            while result not in ["sat", "unsat", "unknown", "timeout", "interrupted", ""]:
+                print("%s %s: %s" % (self.timestamp(), self.solver, result))
+                result = self.read()
+        else:
+            result = self.read()
 
         if self.debug_file:
             print("(set-info :status %s)" % result, file=self.debug_file)
-            print("(check-sat)", file=self.debug_file)
+            print(check_stmt, file=self.debug_file)
             self.debug_file.flush()
 
-        if result not in ["sat", "unsat"]:
+        if result not in expected:
             if result == "":
                 print("%s Unexpected EOF response from solver." % (self.timestamp()), flush=True)
             else:
@@ -707,31 +897,28 @@ class SmtIo:
         return result
 
     def parse(self, stmt):
-        def worker(stmt):
-            if stmt[0] == '(':
+        def worker(stmt, cursor=0):
+            while stmt[cursor] in [" ", "\t", "\r", "\n"]:
+                cursor += 1
+
+            if stmt[cursor] == '(':
                 expr = []
-                cursor = 1
+                cursor += 1
                 while stmt[cursor] != ')':
-                    el, le = worker(stmt[cursor:])
+                    el, cursor = worker(stmt, cursor)
                     expr.append(el)
-                    cursor += le
                 return expr, cursor+1
 
-            if stmt[0] == '|':
+            if stmt[cursor] == '|':
                 expr = "|"
-                cursor = 1
+                cursor += 1
                 while stmt[cursor] != '|':
                     expr += stmt[cursor]
                     cursor += 1
                 expr += "|"
                 return expr, cursor+1
 
-            if stmt[0] in [" ", "\t", "\r", "\n"]:
-                el, le = worker(stmt[1:])
-                return el, le+1
-
             expr = ""
-            cursor = 0
             while stmt[cursor] not in ["(", ")", "|", " ", "\t", "\r", "\n"]:
                 expr += stmt[cursor]
                 cursor += 1
@@ -772,6 +959,55 @@ class SmtIo:
     def bv2int(self, v):
         return int(self.bv2bin(v), 2)
 
+    def get_raw_unsat_assumptions(self):
+        if not self.smt2_assumptions:
+            return []
+        self.write("(get-unsat-assumptions)")
+        exprs = set(self.unparse(part) for part in self.parse(self.read()))
+        unsat_assumptions = []
+        for key, value in self.smt2_assumptions.items():
+            # normalize expression
+            value = self.unparse(self.parse(value))
+            if value in exprs:
+                exprs.remove(value)
+                unsat_assumptions.append(key)
+        return unsat_assumptions
+
+    def get_unsat_assumptions(self, minimize=False):
+        if not minimize:
+            return self.get_raw_unsat_assumptions()
+        orig_assumptions = self.smt2_assumptions
+
+        self.smt2_assumptions = dict(orig_assumptions)
+
+        required_assumptions = {}
+
+        while True:
+            candidate_assumptions = {}
+            for key in self.get_raw_unsat_assumptions():
+                if key not in required_assumptions:
+                    candidate_assumptions[key] = self.smt2_assumptions[key]
+
+            while candidate_assumptions:
+
+                candidate_key, candidate_assume = candidate_assumptions.popitem()
+
+                self.smt2_assumptions = {}
+                for key, assume in candidate_assumptions.items():
+                    self.smt2_assumptions[key] = assume
+                for key, assume in required_assumptions.items():
+                    self.smt2_assumptions[key] = assume
+                result = self.check_sat()
+
+                if result == 'unsat':
+                    candidate_assumptions = None
+                else:
+                    required_assumptions[candidate_key] = candidate_assume
+
+            if candidate_assumptions is not None:
+                self.smt2_assumptions = orig_assumptions
+                return list(required_assumptions)
+
     def get(self, expr):
         self.write("(get-value (%s))" % (expr))
         return self.parse(self.read())[0][1]
@@ -780,7 +1016,7 @@ class SmtIo:
         if len(expr_list) == 0:
             return []
         self.write("(get-value (%s))" % " ".join(expr_list))
-        return [n[1] for n in self.parse(self.read())]
+        return [n[1] for n in self.parse(self.read()) if n]
 
     def get_path(self, mod, path):
         assert mod in self.modinfo
@@ -804,6 +1040,8 @@ class SmtIo:
             assert mod in self.modinfo
             if path[0] == "":
                 return base
+            if isinstance(path[0], int):
+                return "(|%s#%d| %s)" % (mod, path[0], base)
             if path[0] in self.modinfo[mod].cells:
                 return "(|%s_h %s| %s)" % (mod, path[0], base)
             if path[0] in self.modinfo[mod].wsize:
@@ -819,6 +1057,15 @@ class SmtIo:
         nextbase = "(|%s_h %s| %s)" % (mod, path[0], base)
         return self.net_expr(nextmod, nextbase, path[1:])
 
+    def witness_net_expr(self, mod, base, witness):
+        net = self.net_expr(mod, base, witness["smtpath"])
+        is_bool = self.net_width(mod, witness["smtpath"]) == 1
+        if is_bool:
+            assert witness["width"] == 1
+            assert witness["smtoffset"] == 0
+            return net
+        return "((_ extract %d %d) %s)" % (witness["smtoffset"] + witness["width"] - 1, witness["smtoffset"], net)
+
     def net_width(self, mod, net_path):
         for i in range(len(net_path)-1):
             assert mod in self.modinfo
@@ -826,6 +1073,8 @@ class SmtIo:
             mod = self.modinfo[mod].cells[net_path[i]]
 
         assert mod in self.modinfo
+        if isinstance(net_path[-1], int):
+            return None
         assert net_path[-1] in self.modinfo[mod].wsize
         return self.modinfo[mod].wsize[net_path[-1]]
 
@@ -905,7 +1154,7 @@ class SmtIo:
 class SmtOpts:
     def __init__(self):
         self.shortopts = "s:S:v"
-        self.longopts = ["unroll", "noincr", "noprogress", "dump-smt2=", "logic=", "dummy=", "info=", "nocomments"]
+        self.longopts = ["unroll", "noincr", "noprogress", "timeout=", "dump-smt2=", "logic=", "dummy=", "info=", "nocomments", "smt2-option="]
         self.solver = "yices"
         self.solver_opts = list()
         self.debug_print = False
@@ -914,15 +1163,19 @@ class SmtOpts:
         self.unroll = False
         self.noincr = False
         self.timeinfo = os.name != "nt"
+        self.timeout = 0
         self.logic = None
         self.info_stmts = list()
         self.nocomments = False
+        self.smt2_options = {}
 
     def handle(self, o, a):
         if o == "-s":
             self.solver = a
         elif o == "-S":
             self.solver_opts.append(a)
+        elif o == "--timeout":
+            self.timeout = int(a)
         elif o == "-v":
             self.debug_print = True
         elif o == "--unroll":
@@ -941,6 +1194,13 @@ class SmtOpts:
             self.info_stmts.append(a)
         elif o == "--nocomments":
             self.nocomments = True
+        elif o == "--smt2-option":
+            args = a.split('=', 1)
+            if len(args) != 2:
+                print("--smt2-option expects an <option>=<value> argument")
+                sys.exit(1)
+            option, value = args
+            self.smt2_options[option] = value
         else:
             return False
         return True
@@ -948,11 +1208,14 @@ class SmtOpts:
     def helpmsg(self):
         return """
     -s <solver>
-        set SMT solver: z3, yices, boolector, cvc4, mathsat, dummy
+        set SMT solver: z3, yices, boolector, bitwuzla, cvc4, cvc5, mathsat, dummy
         default: yices
 
     -S <opt>
         pass <opt> as command line argument to the solver
+
+    --timeout <value>
+        set the solver timeout to the specified value (in seconds).
 
     --logic <smt2_logic>
         use the specified SMT2 logic (e.g. QF_AUFBV)
@@ -960,6 +1223,9 @@ class SmtOpts:
     --dummy <filename>
         if solver is "dummy", read solver output from that file
         otherwise: write solver output to that file
+
+    --smt2-option <option>=<value>
+        enable an SMT-LIBv2 option.
 
     -v
         enable debug output
@@ -1015,7 +1281,7 @@ class MkVcd:
 
     def escape_name(self, name):
         name = re.sub(r"\[([0-9a-zA-Z_]*[a-zA-Z_][0-9a-zA-Z_]*)\]", r"<\1>", name)
-        if re.match("[\[\]]", name) and name[0] != "\\":
+        if re.match(r"[\[\]]", name) and name[0] != "\\":
             name = "\\" + name
         return name
 
@@ -1023,15 +1289,22 @@ class MkVcd:
         assert t >= self.t
         if t != self.t:
             if self.t == -1:
+                print("$version Generated by Yosys-SMTBMC $end", file=self.f)
+                print("$timescale 1ns $end", file=self.f)
                 print("$var integer 32 t smt_step $end", file=self.f)
                 print("$var event 1 ! smt_clock $end", file=self.f)
+
+                def vcdescape(n):
+                    if n.startswith("$") or ":" in n:
+                        return "\\" + n
+                    return n
 
                 scope = []
                 for path in sorted(self.nets):
                     key, width = self.nets[path]
 
                     uipath = list(path)
-                    if "." in uipath[-1]:
+                    if "." in uipath[-1] and not uipath[-1].startswith("$"):
                         uipath = uipath[0:-1] + uipath[-1].split(".")
                     for i in range(len(uipath)):
                         uipath[i] = re.sub(r"\[([^\]]*)\]", r"<\1>", uipath[i])
@@ -1041,13 +1314,14 @@ class MkVcd:
                         scope = scope[:-1]
 
                     while uipath[:-1] != scope:
-                        print("$scope module %s $end" % uipath[len(scope)], file=self.f)
+                        scopename = uipath[len(scope)]
+                        print("$scope module %s $end" % vcdescape(scopename), file=self.f)
                         scope.append(uipath[len(scope)])
 
                     if path in self.clocks and self.clocks[path][1] == "event":
-                        print("$var event 1 %s %s $end" % (key, uipath[-1]), file=self.f)
+                        print("$var event 1 %s %s $end" % (key, vcdescape(uipath[-1])), file=self.f)
                     else:
-                        print("$var wire %d %s %s $end" % (width, key, uipath[-1]), file=self.f)
+                        print("$var wire %d %s %s $end" % (width, key, vcdescape(uipath[-1])), file=self.f)
 
                 for i in range(len(scope)):
                     print("$upscope $end", file=self.f)

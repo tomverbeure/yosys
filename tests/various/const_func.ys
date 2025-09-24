@@ -1,0 +1,8 @@
+read_verilog -sv const_func.sv
+hierarchy
+proc
+flatten
+opt -full
+select -module top
+async2sync
+sat -verify -tempinduct -prove-asserts -show-all

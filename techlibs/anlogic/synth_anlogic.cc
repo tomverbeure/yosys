@@ -1,8 +1,8 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
- *  Copyright (C) 2018  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -30,7 +30,7 @@ struct SynthAnlogicPass : public ScriptPass
 {
 	SynthAnlogicPass() : ScriptPass("synth_anlogic", "synthesis for Anlogic FPGAs") { }
 
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -58,7 +58,13 @@ struct SynthAnlogicPass : public ScriptPass
 		log("        do not flatten design before synthesis\n");
 		log("\n");
 		log("    -retime\n");
-		log("        run 'abc' with -dff option\n");
+		log("        run 'abc' with '-dff -D 1' options\n");
+		log("\n");
+		log("    -nolutram\n");
+		log("        do not use EG_LOGIC_DRAM16X4 cells in output netlist\n");
+		log("\n");
+		log("    -nobram\n");
+		log("        do not use EG_PHY_BRAM or EG_PHY_BRAM32K cells in output netlist\n");
 		log("\n");
 		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
@@ -67,18 +73,20 @@ struct SynthAnlogicPass : public ScriptPass
 	}
 
 	string top_opt, edif_file, json_file;
-	bool flatten, retime;
+	bool flatten, retime, nolutram, nobram;
 
-	void clear_flags() YS_OVERRIDE
+	void clear_flags() override
 	{
 		top_opt = "-auto-top";
 		edif_file = "";
 		json_file = "";
 		flatten = true;
 		retime = false;
+		nolutram = false;
+		nobram = false;
 	}
 
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		string run_from, run_to;
 		clear_flags();
@@ -110,6 +118,14 @@ struct SynthAnlogicPass : public ScriptPass
 				flatten = false;
 				continue;
 			}
+			if (args[argidx] == "-nolutram") {
+				nolutram = true;
+				continue;
+			}
+			if (args[argidx] == "-nobram") {
+				nobram = true;
+				continue;
+			}
 			if (args[argidx] == "-retime") {
 				retime = true;
 				continue;
@@ -129,12 +145,12 @@ struct SynthAnlogicPass : public ScriptPass
 		log_pop();
 	}
 
-	void script() YS_OVERRIDE
+	void script() override
 	{
 		if (check_label("begin"))
 		{
 			run("read_verilog -lib +/anlogic/cells_sim.v +/anlogic/eagle_bb.v");
-			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt.c_str()));
+			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
 		}
 
 		if (flatten && check_label("flatten", "(unless -noflatten)"))
@@ -150,28 +166,40 @@ struct SynthAnlogicPass : public ScriptPass
 			run("synth -run coarse");
 		}
 
-		if (check_label("dram"))
+		if (check_label("map_ram"))
 		{
-			run("memory_bram -rules +/anlogic/drams.txt");
-			run("techmap -map +/anlogic/drams_map.v");
-			run("anlogic_determine_init");
+			std::string args = "";
+			if (help_mode)
+				args += " [-no-auto-block] [-no-auto-distributed]";
+			else {
+				if (nobram)
+					args += " -no-auto-block";
+				if (nolutram)
+					args += " -no-auto-distributed";
+			}
+			run("memory_libmap -lib +/anlogic/lutrams.txt -lib +/anlogic/brams.txt" + args, "(-no-auto-block if -nobram, -no-auto-distributed if -nolutram)");
+			run("techmap -map +/anlogic/lutrams_map.v -map +/anlogic/brams_map.v");
 		}
 
-		if (check_label("fine"))
+		if (check_label("map_ffram"))
 		{
 			run("opt -fast -mux_undef -undriven -fine");
 			run("memory_map");
 			run("opt -undriven -fine");
+		}
+
+		if (check_label("map_gates"))
+		{
 			run("techmap -map +/techmap.v -map +/anlogic/arith_map.v");
+			run("opt -fast");
 			if (retime || help_mode)
-				run("abc -dff", "(only if -retime)");
+				run("abc -dff -D 1", "(only if -retime)");
 		}
 
 		if (check_label("map_ffs"))
 		{
-			run("dffsr2dff");
+			run("dfflegalize -cell $_DFFE_P??P_ r -cell $_SDFFE_P??P_ r -cell $_DLATCH_N??_ r");
 			run("techmap -D NO_LUT -map +/anlogic/cells_map.v");
-			run("dffinit -strinit SET RESET -ff AL_MAP_SEQ q REGSET -noreinit");
 			run("opt_expr -mux_undef");
 			run("simplemap");
 		}
@@ -186,6 +214,11 @@ struct SynthAnlogicPass : public ScriptPass
 		{
 			run("techmap -map +/anlogic/cells_map.v");
 			run("clean");
+		}
+
+		if (check_label("map_anlogic"))
+		{
+			run("anlogic_fixcarry");
 			run("anlogic_eqn");
 		}
 
@@ -194,18 +227,19 @@ struct SynthAnlogicPass : public ScriptPass
 			run("hierarchy -check");
 			run("stat");
 			run("check -noinit");
+			run("blackbox =A:whitebox");
 		}
 
 		if (check_label("edif"))
 		{
 			if (!edif_file.empty() || help_mode)
-				run(stringf("write_edif %s", help_mode ? "<file-name>" : edif_file.c_str()));
+				run(stringf("write_edif %s", help_mode ? "<file-name>" : edif_file));
 		}
 
 		if (check_label("json"))
 		{
 			if (!json_file.empty() || help_mode)
-				run(stringf("write_json %s", help_mode ? "<file-name>" : json_file.c_str()));
+				run(stringf("write_json %s", help_mode ? "<file-name>" : json_file));
 		}
 	}
 } SynthAnlogicPass;

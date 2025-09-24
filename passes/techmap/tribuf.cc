@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -26,10 +26,12 @@ PRIVATE_NAMESPACE_BEGIN
 struct TribufConfig {
 	bool merge_mode;
 	bool logic_mode;
+	bool formal_mode;
 
 	TribufConfig() {
 		merge_mode = false;
 		logic_mode = false;
+		formal_mode = false;
 	}
 };
 
@@ -55,7 +57,7 @@ struct TribufWorker {
 		dict<SigSpec, vector<Cell*>> tribuf_cells;
 		pool<SigBit> output_bits;
 
-		if (config.logic_mode)
+		if (config.logic_mode || config.formal_mode)
 			for (auto wire : module->wires())
 				if (wire->port_output)
 					for (auto bit : sigmap(wire))
@@ -63,66 +65,100 @@ struct TribufWorker {
 
 		for (auto cell : module->selected_cells())
 		{
-			if (cell->type == "$tribuf")
-				tribuf_cells[sigmap(cell->getPort("\\Y"))].push_back(cell);
+			if (cell->type == ID($tribuf))
+				tribuf_cells[sigmap(cell->getPort(ID::Y))].push_back(cell);
 
-			if (cell->type == "$_TBUF_")
-				tribuf_cells[sigmap(cell->getPort("\\Y"))].push_back(cell);
+			if (cell->type == ID($_TBUF_))
+				tribuf_cells[sigmap(cell->getPort(ID::Y))].push_back(cell);
 
-			if (cell->type.in("$mux", "$_MUX_"))
+			if (cell->type.in(ID($mux), ID($_MUX_)))
 			{
-				IdString en_port = cell->type == "$mux" ? "\\EN" : "\\E";
-				IdString tri_type = cell->type == "$mux" ? "$tribuf" : "$_TBUF_";
+				IdString en_port = cell->type == ID($mux) ? ID::EN : ID::E;
+				IdString tri_type = cell->type == ID($mux) ? ID($tribuf) : ID($_TBUF_);
 
-				if (is_all_z(cell->getPort("\\A")) && is_all_z(cell->getPort("\\B"))) {
+				if (is_all_z(cell->getPort(ID::A)) && is_all_z(cell->getPort(ID::B))) {
 					module->remove(cell);
 					continue;
 				}
 
-				if (is_all_z(cell->getPort("\\A"))) {
-					cell->setPort("\\A", cell->getPort("\\B"));
-					cell->setPort(en_port, cell->getPort("\\S"));
-					cell->unsetPort("\\B");
-					cell->unsetPort("\\S");
+				if (is_all_z(cell->getPort(ID::A))) {
+					cell->setPort(ID::A, cell->getPort(ID::B));
+					cell->setPort(en_port, cell->getPort(ID::S));
+					cell->unsetPort(ID::B);
+					cell->unsetPort(ID::S);
 					cell->type = tri_type;
-					tribuf_cells[sigmap(cell->getPort("\\Y"))].push_back(cell);
+					tribuf_cells[sigmap(cell->getPort(ID::Y))].push_back(cell);
+					module->design->scratchpad_set_bool("tribuf.added_something", true);
 					continue;
 				}
 
-				if (is_all_z(cell->getPort("\\B"))) {
-					cell->setPort(en_port, module->Not(NEW_ID, cell->getPort("\\S")));
-					cell->unsetPort("\\B");
-					cell->unsetPort("\\S");
+				if (is_all_z(cell->getPort(ID::B))) {
+					cell->setPort(en_port, module->Not(NEW_ID, cell->getPort(ID::S)));
+					cell->unsetPort(ID::B);
+					cell->unsetPort(ID::S);
 					cell->type = tri_type;
-					tribuf_cells[sigmap(cell->getPort("\\Y"))].push_back(cell);
+					tribuf_cells[sigmap(cell->getPort(ID::Y))].push_back(cell);
+					module->design->scratchpad_set_bool("tribuf.added_something", true);
 					continue;
 				}
 			}
 		}
 
-		if (config.merge_mode || config.logic_mode)
+		if (config.merge_mode || config.logic_mode || config.formal_mode)
 		{
 			for (auto &it : tribuf_cells)
 			{
 				bool no_tribuf = false;
 
-				if (config.logic_mode) {
+				if (config.logic_mode && !config.formal_mode) {
 					no_tribuf = true;
 					for (auto bit : it.first)
 						if (output_bits.count(bit))
 							no_tribuf = false;
 				}
 
+				if (config.formal_mode)
+					no_tribuf = true;
+
 				if (GetSize(it.second) <= 1 && !no_tribuf)
 					continue;
 
+				if (config.formal_mode && GetSize(it.second) >= 2) {
+					for (auto cell : it.second) {
+						SigSpec others_s;
+
+						for (auto other_cell : it.second) {
+							if (other_cell == cell)
+								continue;
+							else if (other_cell->type == ID($tribuf))
+								others_s.append(other_cell->getPort(ID::EN));
+							else
+								others_s.append(other_cell->getPort(ID::E));
+						}
+
+						auto cell_s = cell->type == ID($tribuf) ? cell->getPort(ID::EN) : cell->getPort(ID::E);
+
+						auto other_s = module->ReduceOr(NEW_ID, others_s);
+
+						auto conflict = module->And(NEW_ID, cell_s, other_s);
+
+						std::string name = stringf("$tribuf_conflict$%s", log_id(cell->name));
+						auto assert_cell = module->addAssert(name, module->Not(NEW_ID, conflict), SigSpec(true));
+
+						assert_cell->set_src_attribute(cell->get_src_attribute());
+						assert_cell->set_bool_attribute(ID::keep);
+
+						module->design->scratchpad_set_bool("tribuf.added_something", true);
+					}
+				}
+
 				SigSpec pmux_b, pmux_s;
 				for (auto cell : it.second) {
-					if (cell->type == "$tribuf")
-						pmux_s.append(cell->getPort("\\EN"));
+					if (cell->type == ID($tribuf))
+						pmux_s.append(cell->getPort(ID::EN));
 					else
-						pmux_s.append(cell->getPort("\\E"));
-					pmux_b.append(cell->getPort("\\A"));
+						pmux_s.append(cell->getPort(ID::E));
+					pmux_b.append(cell->getPort(ID::A));
 					module->remove(cell);
 				}
 
@@ -130,8 +166,10 @@ struct TribufWorker {
 
 				if (no_tribuf)
 					module->connect(it.first, muxout);
-				else
+				else {
 					module->addTribuf(NEW_ID, muxout, module->ReduceOr(NEW_ID, pmux_s), it.first);
+					module->design->scratchpad_set_bool("tribuf.added_something", true);
+				}
 			}
 		}
 	}
@@ -139,7 +177,7 @@ struct TribufWorker {
 
 struct TribufPass : public Pass {
 	TribufPass() : Pass("tribuf", "infer tri-state buffers") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -155,8 +193,13 @@ struct TribufPass : public Pass {
 		log("        convert tri-state buffers that do not drive output ports\n");
 		log("        to non-tristate logic. this option implies -merge.\n");
 		log("\n");
+		log("    -formal\n");
+		log("        convert all tri-state buffers to non-tristate logic and\n");
+		log("        add a formal assertion that no two buffers are driving the\n");
+		log("        same net simultaneously. this option implies -merge.\n");
+		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		TribufConfig config;
 
@@ -170,6 +213,10 @@ struct TribufPass : public Pass {
 			}
 			if (args[argidx] == "-logic") {
 				config.logic_mode = true;
+				continue;
+			}
+			if (args[argidx] == "-formal") {
+				config.formal_mode = true;
 				continue;
 			}
 			break;

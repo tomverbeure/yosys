@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -33,6 +33,8 @@ struct JsonWriter
 	std::ostream &f;
 	bool use_selection;
 	bool aig_mode;
+	bool compat_int_mode;
+	bool scopeinfo_mode;
 
 	Design *design;
 	Module *module;
@@ -42,16 +44,32 @@ struct JsonWriter
 	dict<SigBit, string> sigids;
 	pool<Aig> aig_models;
 
-	JsonWriter(std::ostream &f, bool use_selection, bool aig_mode) :
-			f(f), use_selection(use_selection), aig_mode(aig_mode) { }
+	JsonWriter(std::ostream &f, bool use_selection, bool aig_mode, bool compat_int_mode, bool scopeinfo_mode) :
+			f(f), use_selection(use_selection), aig_mode(aig_mode),
+			compat_int_mode(compat_int_mode), scopeinfo_mode(scopeinfo_mode) { }
 
 	string get_string(string str)
 	{
 		string newstr = "\"";
 		for (char c : str) {
 			if (c == '\\')
+				newstr += "\\\\";
+			else if (c == '"')
+				newstr += "\\\"";
+			else if (c == '\b')
+				newstr += "\\b";
+			else if (c == '\f')
+				newstr += "\\f";
+			else if (c == '\n')
+				newstr += "\\n";
+			else if (c == '\r')
+				newstr += "\\r";
+			else if (c == '\t')
+				newstr += "\\t";
+			else if (c < 0x20)
+				newstr += stringf("\\u%04X", c);
+			else
 				newstr += c;
-			newstr += c;
 		}
 		return newstr + "\"";
 	}
@@ -83,20 +101,42 @@ struct JsonWriter
 		return str + " ]";
 	}
 
+	void write_parameter_value(const Const &value)
+	{
+		if ((value.flags & RTLIL::ConstFlags::CONST_FLAG_STRING) != 0) {
+			string str = value.decode_string();
+			int state = 0;
+			for (char c : str) {
+				if (state == 0) {
+					if (c == '0' || c == '1' || c == 'x' || c == 'z')
+						state = 0;
+					else if (c == ' ')
+						state = 1;
+					else
+						state = 2;
+				} else if (state == 1 && c != ' ')
+					state = 2;
+			}
+			if (state < 2)
+				str += " ";
+			f << get_string(str);
+		} else if (compat_int_mode && GetSize(value) <= 32 && value.is_fully_def()) {
+			if ((value.flags & RTLIL::ConstFlags::CONST_FLAG_SIGNED) != 0)
+				f << stringf("%d", value.as_int());
+			else
+				f << stringf("%u", value.as_int());
+		} else {
+			f << get_string(value.as_string());
+		}
+	}
+
 	void write_parameters(const dict<IdString, Const> &parameters, bool for_module=false)
 	{
 		bool first = true;
 		for (auto &param : parameters) {
 			f << stringf("%s\n", first ? "" : ",");
-			f << stringf("        %s%s: ", for_module ? "" : "    ", get_name(param.first).c_str());
-			if ((param.second.flags & RTLIL::ConstFlags::CONST_FLAG_STRING) != 0)
-				f << get_string(param.second.decode_string());
-			else if (GetSize(param.second.bits) > 32)
-				f << get_string(param.second.as_string());
-			else if ((param.second.flags & RTLIL::ConstFlags::CONST_FLAG_SIGNED) != 0)
-				f << stringf("%d", param.second.as_int());
-			else
-				f << stringf("%u", param.second.as_int());
+			f << stringf("        %s%s: ", for_module ? "" : "    ", get_name(param.first));
+			write_parameter_value(param.second);
 			first = false;
 		}
 	}
@@ -111,11 +151,21 @@ struct JsonWriter
 		// reserve 0 and 1 to avoid confusion with "0" and "1"
 		sigidcounter = 2;
 
-		f << stringf("    %s: {\n", get_name(module->name).c_str());
+		if (module->has_processes()) {
+			log_error("Module %s contains processes, which are not supported by JSON backend (run `proc` first).\n", log_id(module));
+		}
+
+		f << stringf("    %s: {\n", get_name(module->name));
 
 		f << stringf("      \"attributes\": {");
 		write_parameters(module->attributes, /*for_module=*/true);
 		f << stringf("\n      },\n");
+
+		if (module->parameter_default_values.size()) {
+			f << stringf("      \"parameter_default_values\": {");
+			write_parameters(module->parameter_default_values, /*for_module=*/true);
+			f << stringf("\n      },\n");
+		}
 
 		f << stringf("      \"ports\": {");
 		bool first = true;
@@ -124,9 +174,15 @@ struct JsonWriter
 			if (use_selection && !module->selected(w))
 				continue;
 			f << stringf("%s\n", first ? "" : ",");
-			f << stringf("        %s: {\n", get_name(n).c_str());
+			f << stringf("        %s: {\n", get_name(n));
 			f << stringf("          \"direction\": \"%s\",\n", w->port_input ? w->port_output ? "inout" : "input" : "output");
-			f << stringf("          \"bits\": %s\n", get_bits(w).c_str());
+			if (w->start_offset)
+				f << stringf("          \"offset\": %d,\n", w->start_offset);
+			if (w->upto)
+				f << stringf("          \"upto\": 1,\n");
+			if (w->is_signed)
+				f << stringf("          \"signed\": %d,\n", w->is_signed);
+			f << stringf("          \"bits\": %s\n", get_bits(w));
 			f << stringf("        }");
 			first = false;
 		}
@@ -137,14 +193,16 @@ struct JsonWriter
 		for (auto c : module->cells()) {
 			if (use_selection && !module->selected(c))
 				continue;
+			if (!scopeinfo_mode && c->type == ID($scopeinfo))
+				continue;
 			f << stringf("%s\n", first ? "" : ",");
-			f << stringf("        %s: {\n", get_name(c->name).c_str());
+			f << stringf("        %s: {\n", get_name(c->name));
 			f << stringf("          \"hide_name\": %s,\n", c->name[0] == '$' ? "1" : "0");
-			f << stringf("          \"type\": %s,\n", get_name(c->type).c_str());
+			f << stringf("          \"type\": %s,\n", get_name(c->type));
 			if (aig_mode) {
 				Aig aig(c);
 				if (!aig.name.empty()) {
-					f << stringf("          \"model\": \"%s\",\n", aig.name.c_str());
+					f << stringf("          \"model\": \"%s\",\n", aig.name);
 					aig_models.insert(aig);
 				}
 			}
@@ -162,7 +220,7 @@ struct JsonWriter
 					if (c->input(conn.first))
 						direction = c->output(conn.first) ? "inout" : "input";
 					f << stringf("%s\n", first2 ? "" : ",");
-					f << stringf("            %s: \"%s\"", get_name(conn.first).c_str(), direction.c_str());
+					f << stringf("            %s: \"%s\"", get_name(conn.first), direction);
 					first2 = false;
 				}
 				f << stringf("\n          },\n");
@@ -171,7 +229,7 @@ struct JsonWriter
 			bool first2 = true;
 			for (auto &conn : c->connections()) {
 				f << stringf("%s\n", first2 ? "" : ",");
-				f << stringf("            %s: %s", get_name(conn.first).c_str(), get_bits(conn.second).c_str());
+				f << stringf("            %s: %s", get_name(conn.first), get_bits(conn.second));
 				first2 = false;
 			}
 			f << stringf("\n          }\n");
@@ -180,15 +238,42 @@ struct JsonWriter
 		}
 		f << stringf("\n      },\n");
 
+		if (!module->memories.empty()) {
+			f << stringf("      \"memories\": {");
+			first = true;
+			for (auto &it : module->memories) {
+				if (use_selection && !module->selected(it.second))
+					continue;
+				f << stringf("%s\n", first ? "" : ",");
+				f << stringf("        %s: {\n", get_name(it.second->name));
+				f << stringf("          \"hide_name\": %s,\n", it.second->name[0] == '$' ? "1" : "0");
+				f << stringf("          \"attributes\": {");
+				write_parameters(it.second->attributes);
+				f << stringf("\n          },\n");
+				f << stringf("          \"width\": %d,\n", it.second->width);
+				f << stringf("          \"start_offset\": %d,\n", it.second->start_offset);
+				f << stringf("          \"size\": %d\n", it.second->size);
+				f << stringf("        }");
+				first = false;
+			}
+			f << stringf("\n      },\n");
+		}
+
 		f << stringf("      \"netnames\": {");
 		first = true;
 		for (auto w : module->wires()) {
 			if (use_selection && !module->selected(w))
 				continue;
 			f << stringf("%s\n", first ? "" : ",");
-			f << stringf("        %s: {\n", get_name(w->name).c_str());
+			f << stringf("        %s: {\n", get_name(w->name));
 			f << stringf("          \"hide_name\": %s,\n", w->name[0] == '$' ? "1" : "0");
-			f << stringf("          \"bits\": %s,\n", get_bits(w).c_str());
+			f << stringf("          \"bits\": %s,\n", get_bits(w));
+			if (w->start_offset)
+				f << stringf("          \"offset\": %d,\n", w->start_offset);
+			if (w->upto)
+				f << stringf("          \"upto\": 1,\n");
+			if (w->is_signed)
+				f << stringf("          \"signed\": %d,\n", w->is_signed);
 			f << stringf("          \"attributes\": {");
 			write_parameters(w->attributes);
 			f << stringf("\n          }\n");
@@ -206,7 +291,7 @@ struct JsonWriter
 		design->sort();
 
 		f << stringf("{\n");
-		f << stringf("  \"creator\": %s,\n", get_string(yosys_version_str).c_str());
+		f << stringf("  \"creator\": %s,\n", get_string(yosys_maybe_version()));
 		f << stringf("  \"modules\": {\n");
 		vector<Module*> modules = use_selection ? design->selected_modules() : design->modules();
 		bool first_module = true;
@@ -223,7 +308,7 @@ struct JsonWriter
 			for (auto &aig : aig_models) {
 				if (!first_model)
 					f << stringf(",\n");
-				f << stringf("    \"%s\": [\n", aig.name.c_str());
+				f << stringf("    \"%s\": [\n", aig.name);
 				int node_idx = 0;
 				for (auto &node : aig.nodes) {
 					if (node_idx != 0)
@@ -252,7 +337,7 @@ struct JsonWriter
 
 struct JsonBackend : public Backend {
 	JsonBackend() : Backend("json", "write design to a JSON file") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -263,18 +348,41 @@ struct JsonBackend : public Backend {
 		log("    -aig\n");
 		log("        include AIG models for the different gate types\n");
 		log("\n");
+		log("    -compat-int\n");
+		log("        emit 32-bit or smaller fully-defined parameter values directly\n");
+		log("        as JSON numbers (for compatibility with old parsers)\n");
+		log("\n");
+		log("    -selected\n");
+		log("        output only select module\n");
+		log("\n");
+		log("    -noscopeinfo\n");
+		log("        don't include $scopeinfo cells in the output\n");
+		log("\n");
 		log("\n");
 		log("The general syntax of the JSON output created by this command is as follows:\n");
 		log("\n");
 		log("    {\n");
+		log("      \"creator\": \"Yosys <version info>\",\n");
 		log("      \"modules\": {\n");
 		log("        <module_name>: {\n");
+		log("          \"attributes\": {\n");
+		log("            <attribute_name>: <attribute_value>,\n");
+		log("            ...\n");
+		log("          },\n");
+		log("          \"parameter_default_values\": {\n");
+		log("            <parameter_name>: <parameter_value>,\n");
+		log("            ...\n");
+		log("          },\n");
 		log("          \"ports\": {\n");
 		log("            <port_name>: <port_details>,\n");
 		log("            ...\n");
 		log("          },\n");
 		log("          \"cells\": {\n");
 		log("            <cell_name>: <cell_details>,\n");
+		log("            ...\n");
+		log("          },\n");
+		log("          \"memories\": {\n");
+		log("            <memory_name>: <memory_details>,\n");
 		log("            ...\n");
 		log("          },\n");
 		log("          \"netnames\": {\n");
@@ -293,13 +401,20 @@ struct JsonBackend : public Backend {
 		log("    {\n");
 		log("      \"direction\": <\"input\" | \"output\" | \"inout\">,\n");
 		log("      \"bits\": <bit_vector>\n");
+		log("      \"offset\": <the lowest bit index in use, if non-0>\n");
+		log("      \"upto\": <1 if the port bit indexing is MSB-first>\n");
+		log("      \"signed\": <1 if the port is signed>\n");
 		log("    }\n");
 		log("\n");
+		log("The \"offset\" and \"upto\" fields are skipped if their value would be 0.\n");
+		log("They don't affect connection semantics, and are only used to preserve original\n");
+		log("HDL bit indexing.\n");
 		log("And <cell_details> is:\n");
 		log("\n");
 		log("    {\n");
 		log("      \"hide_name\": <1 | 0>,\n");
 		log("      \"type\": <cell_type>,\n");
+		log("      \"model\": <AIG model name, if -aig option used>,\n");
 		log("      \"parameters\": {\n");
 		log("        <parameter_name>: <parameter_value>,\n");
 		log("        ...\n");
@@ -318,11 +433,27 @@ struct JsonBackend : public Backend {
 		log("      },\n");
 		log("    }\n");
 		log("\n");
+		log("And <memory_details> is:\n");
+		log("\n");
+		log("    {\n");
+		log("      \"hide_name\": <1 | 0>,\n");
+		log("      \"attributes\": {\n");
+		log("        <attribute_name>: <attribute_value>,\n");
+		log("        ...\n");
+		log("      },\n");
+		log("      \"width\": <memory width>\n");
+		log("      \"start_offset\": <the lowest valid memory address>\n");
+		log("      \"size\": <memory size>\n");
+		log("    }\n");
+		log("\n");
 		log("And <net_details> is:\n");
 		log("\n");
 		log("    {\n");
 		log("      \"hide_name\": <1 | 0>,\n");
 		log("      \"bits\": <bit_vector>\n");
+		log("      \"offset\": <the lowest bit index in use, if non-0>\n");
+		log("      \"upto\": <1 if the port bit indexing is MSB-first>\n");
+		log("      \"signed\": <1 if the port is signed>\n");
 		log("    }\n");
 		log("\n");
 		log("The \"hide_name\" fields are set to 1 when the name of this cell or net is\n");
@@ -334,12 +465,12 @@ struct JsonBackend : public Backend {
 		log("Module and cell ports and nets can be single bit wide or vectors of multiple\n");
 		log("bits. Each individual signal bit is assigned a unique integer. The <bit_vector>\n");
 		log("values referenced above are vectors of this integers. Signal bits that are\n");
-		log("connected to a constant driver are denoted as string \"0\" or \"1\" instead of\n");
-		log("a number.\n");
+		log("connected to a constant driver are denoted as string \"0\", \"1\", \"x\", or\n");
+		log("\"z\" instead of a number.\n");
 		log("\n");
-		log("Numeric parameter and attribute values up to 32 bits are written as decimal\n");
-		log("values. Numbers larger than that are written as string holding the binary\n");
-		log("representation of the value.\n");
+		log("Bit vectors (including integers) are written as string holding the binary\n");
+		log("representation of the value. Strings are written as strings, with an appended\n");
+		log("blank in cases of strings of the form /[01xz]* */.\n");
 		log("\n");
 		log("For example the following Verilog code:\n");
 		log("\n");
@@ -350,9 +481,15 @@ struct JsonBackend : public Backend {
 		log("\n");
 		log("Translates to the following JSON output:\n");
 		log("\n");
+
 		log("    {\n");
+		log("      \"creator\": \"Yosys 0.9+2406 (git sha1 fb1168d8, clang 9.0.1 -fPIC -Os)\",\n");
 		log("      \"modules\": {\n");
 		log("        \"test\": {\n");
+		log("          \"attributes\": {\n");
+		log("            \"cells_not_processed\": \"00000000000000000000000000000001\",\n");
+		log("            \"src\": \"test.v:1.1-4.10\"\n");
+		log("          },\n");
 		log("          \"ports\": {\n");
 		log("            \"x\": {\n");
 		log("              \"direction\": \"input\",\n");
@@ -368,33 +505,34 @@ struct JsonBackend : public Backend {
 		log("              \"hide_name\": 0,\n");
 		log("              \"type\": \"foo\",\n");
 		log("              \"parameters\": {\n");
-		log("                \"Q\": 1337,\n");
-		log("                \"P\": 42\n");
+		log("                \"P\": \"00000000000000000000000000101010\",\n");
+		log("                \"Q\": \"00000000000000000000010100111001\"\n");
 		log("              },\n");
 		log("              \"attributes\": {\n");
-		log("                \"keep\": 1,\n");
-		log("                \"src\": \"test.v:2\"\n");
+		log("                \"keep\": \"00000000000000000000000000000001\",\n");
+		log("                \"module_not_derived\": \"00000000000000000000000000000001\",\n");
+		log("                \"src\": \"test.v:3.1-3.55\"\n");
 		log("              },\n");
 		log("              \"connections\": {\n");
-		log("                \"C\": [ 2, 2, 2, 2, \"0\", \"1\", \"0\", \"1\" ],\n");
+		log("                \"A\": [ 3, 2 ],\n");
 		log("                \"B\": [ 2, 3 ],\n");
-		log("                \"A\": [ 3, 2 ]\n");
+		log("                \"C\": [ 2, 2, 2, 2, \"0\", \"1\", \"0\", \"1\" ]\n");
 		log("              }\n");
 		log("            }\n");
 		log("          },\n");
 		log("          \"netnames\": {\n");
-		log("            \"y\": {\n");
-		log("              \"hide_name\": 0,\n");
-		log("              \"bits\": [ 3 ],\n");
-		log("              \"attributes\": {\n");
-		log("                \"src\": \"test.v:1\"\n");
-		log("              }\n");
-		log("            },\n");
 		log("            \"x\": {\n");
 		log("              \"hide_name\": 0,\n");
 		log("              \"bits\": [ 2 ],\n");
 		log("              \"attributes\": {\n");
-		log("                \"src\": \"test.v:1\"\n");
+		log("                \"src\": \"test.v:1.19-1.20\"\n");
+		log("              }\n");
+		log("            },\n");
+		log("            \"y\": {\n");
+		log("              \"hide_name\": 0,\n");
+		log("              \"bits\": [ 3 ],\n");
+		log("              \"attributes\": {\n");
+		log("                \"src\": \"test.v:1.22-1.23\"\n");
 		log("              }\n");
 		log("            }\n");
 		log("          }\n");
@@ -460,9 +598,12 @@ struct JsonBackend : public Backend {
 		log("format. A program processing this format must ignore all unknown fields.\n");
 		log("\n");
 	}
-	void execute(std::ostream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::ostream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		bool aig_mode = false;
+		bool compat_int_mode = false;
+		bool use_selection = false;
+		bool scopeinfo_mode = true;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
@@ -471,20 +612,32 @@ struct JsonBackend : public Backend {
 				aig_mode = true;
 				continue;
 			}
+			if (args[argidx] == "-compat-int") {
+				compat_int_mode = true;
+				continue;
+			}
+			if (args[argidx] == "-selected") {
+				use_selection = true;
+				continue;
+			}
+			if (args[argidx] == "-noscopeinfo") {
+				scopeinfo_mode = false;
+				continue;
+			}
 			break;
 		}
 		extra_args(f, filename, args, argidx);
 
 		log_header(design, "Executing JSON backend.\n");
 
-		JsonWriter json_writer(*f, false, aig_mode);
+		JsonWriter json_writer(*f, use_selection, aig_mode, compat_int_mode, scopeinfo_mode);
 		json_writer.write_design(design);
 	}
 } JsonBackend;
 
 struct JsonPass : public Pass {
 	JsonPass() : Pass("json", "write design in JSON format") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -498,13 +651,22 @@ struct JsonPass : public Pass {
 		log("    -aig\n");
 		log("        also include AIG models for the different gate types\n");
 		log("\n");
+		log("    -compat-int\n");
+		log("        emit 32-bit or smaller fully-defined parameter values directly\n");
+		log("        as JSON numbers (for compatibility with old parsers)\n");
+		log("\n");
+		log("    -noscopeinfo\n");
+		log("        don't include $scopeinfo cells in the output\n");
+		log("\n");
 		log("See 'help write_json' for a description of the JSON format used.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::string filename;
 		bool aig_mode = false;
+		bool compat_int_mode = false;
+		bool scopeinfo_mode = true;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
@@ -517,32 +679,42 @@ struct JsonPass : public Pass {
 				aig_mode = true;
 				continue;
 			}
+			if (args[argidx] == "-compat-int") {
+				compat_int_mode = true;
+				continue;
+			}
+			if (args[argidx] == "-noscopeinfo") {
+				scopeinfo_mode = false;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		std::ostream *f;
 		std::stringstream buf;
+		bool empty = filename.empty();
 
-		if (!filename.empty()) {
+		if (!empty) {
+			rewrite_filename(filename);
 			std::ofstream *ff = new std::ofstream;
 			ff->open(filename.c_str(), std::ofstream::trunc);
 			if (ff->fail()) {
 				delete ff;
-				log_error("Can't open file `%s' for writing: %s\n", filename.c_str(), strerror(errno));
+				log_error("Can't open file `%s' for writing: %s\n", filename, strerror(errno));
 			}
 			f = ff;
 		} else {
 			f = &buf;
 		}
 
-		JsonWriter json_writer(*f, true, aig_mode);
+		JsonWriter json_writer(*f, true, aig_mode, compat_int_mode, scopeinfo_mode);
 		json_writer.write_design(design);
 
-		if (!filename.empty()) {
+		if (!empty) {
 			delete f;
 		} else {
-			log("%s", buf.str().c_str());
+			log("%s", buf.str());
 		}
 	}
 } JsonPass;

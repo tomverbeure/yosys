@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -38,6 +38,7 @@ endmodule
 module \$lut (A, Y);
    parameter WIDTH  = 0;
    parameter LUT    = 0;
+   (* force_downto *)
    input [WIDTH-1:0] A;
    output 	     Y;
    generate

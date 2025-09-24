@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -21,17 +21,12 @@
 // Niklas Een and Niklas Sörensson (2003)
 // http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.4.8161
 
-#include "kernel/register.h"
 #include "kernel/celltypes.h"
 #include "kernel/consteval.h"
 #include "kernel/sigtools.h"
-#include "kernel/log.h"
 #include "kernel/satgen.h"
-#include <stdlib.h>
-#include <stdio.h>
-#include <algorithm>
-#include <errno.h>
-#include <string.h>
+#include "kernel/yosys.h"
+#include "kernel/log_help.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -65,11 +60,12 @@ struct SatHelper
 	int max_timestep, timeout;
 	bool gotTimeout;
 
-	SatHelper(RTLIL::Design *design, RTLIL::Module *module, bool enable_undef) :
+	SatHelper(RTLIL::Design *design, RTLIL::Module *module, bool enable_undef, bool set_def_formal) :
 		design(design), module(module), sigmap(module), ct(design), satgen(ez.get(), &sigmap)
 	{
 		this->enable_undef = enable_undef;
 		satgen.model_undef = enable_undef;
+		satgen.def_formal = set_def_formal;
 		set_init_def = false;
 		set_init_undef = false;
 		set_init_zero = false;
@@ -110,9 +106,9 @@ struct SatHelper
 			RTLIL::SigSpec lhs, rhs;
 
 			if (!RTLIL::SigSpec::parse_sel(lhs, design, module, s.first))
-				log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.first.c_str());
+				log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.first);
 			if (!RTLIL::SigSpec::parse_rhs(lhs, rhs, module, s.second))
-				log_cmd_error("Failed to parse rhs set expression `%s'.\n", s.second.c_str());
+				log_cmd_error("Failed to parse rhs set expression `%s'.\n", s.second);
 			show_signal_pool.add(sigmap(lhs));
 			show_signal_pool.add(sigmap(rhs));
 
@@ -131,9 +127,9 @@ struct SatHelper
 			RTLIL::SigSpec lhs, rhs;
 
 			if (!RTLIL::SigSpec::parse_sel(lhs, design, module, s.first))
-				log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.first.c_str());
+				log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.first);
 			if (!RTLIL::SigSpec::parse_rhs(lhs, rhs, module, s.second))
-				log_cmd_error("Failed to parse rhs set expression `%s'.\n", s.second.c_str());
+				log_cmd_error("Failed to parse rhs set expression `%s'.\n", s.second);
 			show_signal_pool.add(sigmap(lhs));
 			show_signal_pool.add(sigmap(rhs));
 
@@ -152,7 +148,7 @@ struct SatHelper
 			RTLIL::SigSpec lhs;
 
 			if (!RTLIL::SigSpec::parse_sel(lhs, design, module, s))
-				log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse lhs set expression `%s'.\n", s);
 			show_signal_pool.add(sigmap(lhs));
 
 			log("Import unset-constraint for this timestep: %s\n", log_signal(lhs));
@@ -171,28 +167,28 @@ struct SatHelper
 		for (auto &s : sets_def) {
 			RTLIL::SigSpec sig;
 			if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-				log_cmd_error("Failed to parse set-def expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse set-def expression `%s'.\n", s);
 			sets_def_undef[0].insert(sig);
 		}
 
 		for (auto &s : sets_any_undef) {
 			RTLIL::SigSpec sig;
 			if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-				log_cmd_error("Failed to parse set-def expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse set-def expression `%s'.\n", s);
 			sets_def_undef[1].insert(sig);
 		}
 
 		for (auto &s : sets_all_undef) {
 			RTLIL::SigSpec sig;
 			if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-				log_cmd_error("Failed to parse set-def expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse set-def expression `%s'.\n", s);
 			sets_def_undef[2].insert(sig);
 		}
 
 		for (auto &s : sets_def_at[timestep]) {
 			RTLIL::SigSpec sig;
 			if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-				log_cmd_error("Failed to parse set-def expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse set-def expression `%s'.\n", s);
 			sets_def_undef[0].insert(sig);
 			sets_def_undef[1].erase(sig);
 			sets_def_undef[2].erase(sig);
@@ -201,7 +197,7 @@ struct SatHelper
 		for (auto &s : sets_any_undef_at[timestep]) {
 			RTLIL::SigSpec sig;
 			if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-				log_cmd_error("Failed to parse set-def expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse set-def expression `%s'.\n", s);
 			sets_def_undef[0].erase(sig);
 			sets_def_undef[1].insert(sig);
 			sets_def_undef[2].erase(sig);
@@ -210,7 +206,7 @@ struct SatHelper
 		for (auto &s : sets_all_undef_at[timestep]) {
 			RTLIL::SigSpec sig;
 			if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-				log_cmd_error("Failed to parse set-def expression `%s'.\n", s.c_str());
+				log_cmd_error("Failed to parse set-def expression `%s'.\n", s);
 			sets_def_undef[0].erase(sig);
 			sets_def_undef[1].erase(sig);
 			sets_def_undef[2].insert(sig);
@@ -254,22 +250,29 @@ struct SatHelper
 
 		if (initstate)
 		{
-			RTLIL::SigSpec big_lhs, big_rhs;
+			RTLIL::SigSpec big_lhs, big_rhs, forced_def;
 
-			for (auto &it : module->wires_)
+			// Check for $anyinit cells that are forced to be defined
+			if (set_init_undef && satgen.def_formal)
+				for (auto cell : module->cells())
+					if (cell->type == ID($anyinit))
+						forced_def.append(sigmap(cell->getPort(ID::Q)));
+
+			for (auto wire : module->wires())
 			{
-				if (it.second->attributes.count("\\init") == 0)
+				if (wire->attributes.count(ID::init) == 0)
 					continue;
 
-				RTLIL::SigSpec lhs = sigmap(it.second);
-				RTLIL::SigSpec rhs = it.second->attributes.at("\\init");
+				RTLIL::SigSpec lhs = sigmap(wire);
+				RTLIL::SigSpec rhs = wire->attributes.at(ID::init);
 				log_assert(lhs.size() == rhs.size());
 
 				RTLIL::SigSpec removed_bits;
 				for (int i = 0; i < lhs.size(); i++) {
 					RTLIL::SigSpec bit = lhs.extract(i, 1);
-					if (!satgen.initial_state.check_all(bit)) {
-						removed_bits.append(bit);
+					if (rhs[i] == State::Sx || !satgen.initial_state.check_all(bit)) {
+						if (rhs[i] != State::Sx)
+							removed_bits.append(bit);
 						lhs.remove(i, 1);
 						rhs.remove(i, 1);
 						i--;
@@ -292,9 +295,9 @@ struct SatHelper
 				RTLIL::SigSpec lhs, rhs;
 
 				if (!RTLIL::SigSpec::parse_sel(lhs, design, module, s.first))
-					log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.first.c_str());
+					log_cmd_error("Failed to parse lhs set expression `%s'.\n", s.first);
 				if (!RTLIL::SigSpec::parse_rhs(lhs, rhs, module, s.second))
-					log_cmd_error("Failed to parse rhs set expression `%s'.\n", s.second.c_str());
+					log_cmd_error("Failed to parse rhs set expression `%s'.\n", s.second);
 				show_signal_pool.add(sigmap(lhs));
 				show_signal_pool.add(sigmap(rhs));
 
@@ -322,6 +325,7 @@ struct SatHelper
 			if (set_init_undef) {
 				RTLIL::SigSpec rem = satgen.initial_state.export_all();
 				rem.remove(big_lhs);
+				rem.remove(forced_def);
 				big_lhs.append(rem);
 				big_rhs.append(RTLIL::SigSpec(RTLIL::State::Sx, rem.size()));
 			}
@@ -358,9 +362,9 @@ struct SatHelper
 				RTLIL::SigSpec lhs, rhs;
 
 				if (!RTLIL::SigSpec::parse_sel(lhs, design, module, s.first))
-					log_cmd_error("Failed to parse lhs proof expression `%s'.\n", s.first.c_str());
+					log_cmd_error("Failed to parse lhs proof expression `%s'.\n", s.first);
 				if (!RTLIL::SigSpec::parse_rhs(lhs, rhs, module, s.second))
-					log_cmd_error("Failed to parse rhs proof expression `%s'.\n", s.second.c_str());
+					log_cmd_error("Failed to parse rhs proof expression `%s'.\n", s.second);
 				show_signal_pool.add(sigmap(lhs));
 				show_signal_pool.add(sigmap(rhs));
 
@@ -386,9 +390,9 @@ struct SatHelper
 				RTLIL::SigSpec lhs, rhs;
 
 				if (!RTLIL::SigSpec::parse_sel(lhs, design, module, s.first))
-					log_cmd_error("Failed to parse lhs proof-x expression `%s'.\n", s.first.c_str());
+					log_cmd_error("Failed to parse lhs proof-x expression `%s'.\n", s.first);
 				if (!RTLIL::SigSpec::parse_rhs(lhs, rhs, module, s.second))
-					log_cmd_error("Failed to parse rhs proof-x expression `%s'.\n", s.second.c_str());
+					log_cmd_error("Failed to parse rhs proof-x expression `%s'.\n", s.second);
 				show_signal_pool.add(sigmap(lhs));
 				show_signal_pool.add(sigmap(rhs));
 
@@ -517,9 +521,9 @@ struct SatHelper
 				} else {
 					for (auto &d : drivers)
 					for (auto &p : d->connections()) {
-						if (d->type == "$dff" && p.first == "\\CLK")
+						if (d->type == ID($dff) && p.first == ID::CLK)
 							continue;
-						if (d->type.substr(0, 6) == "$_DFF_" && p.first == "\\C")
+						if (d->type.begins_with("$_DFF_") && p.first == ID::C)
 							continue;
 						queued_signals.add(handled_signals.remove(sigmap(p.second)));
 					}
@@ -536,7 +540,7 @@ struct SatHelper
 			for (auto &s : shows) {
 				RTLIL::SigSpec sig;
 				if (!RTLIL::SigSpec::parse_sel(sig, design, module, s))
-					log_cmd_error("Failed to parse show expression `%s'.\n", s.c_str());
+					log_cmd_error("Failed to parse show expression `%s'.\n", s);
 				log("Import show expression: %s\n", log_signal(sig));
 				modelSig.append(sig);
 			}
@@ -616,24 +620,28 @@ struct SatHelper
 		int last_timestep = -2;
 		for (auto &info : modelInfo)
 		{
-			RTLIL::Const value;
 			bool found_undef = false;
 
+			RTLIL::Const::Builder value_builder(info.width);
 			for (int i = 0; i < info.width; i++) {
-				value.bits.push_back(modelValues.at(info.offset+i) ? RTLIL::State::S1 : RTLIL::State::S0);
-				if (enable_undef && modelValues.at(modelExpressions.size()/2 + info.offset + i))
-					value.bits.back() = RTLIL::State::Sx, found_undef = true;
+				RTLIL::State bit = modelValues.at(info.offset+i) ? RTLIL::State::S1 : RTLIL::State::S0;
+				if (enable_undef && modelValues.at(modelExpressions.size()/2 + info.offset + i)) {
+					bit = RTLIL::State::Sx;
+					found_undef = true;
+				}
+				value_builder.push_back(bit);
 			}
+			RTLIL::Const value = value_builder.build();
 
 			if (info.timestep != last_timestep) {
 				const char *hline = "---------------------------------------------------------------------------------------------------"
 						    "---------------------------------------------------------------------------------------------------"
 						    "---------------------------------------------------------------------------------------------------";
 				if (last_timestep == -2) {
-					log(max_timestep > 0 ? "  Time " : "  ");
+					log("%s", max_timestep > 0 ? "  Time " : "  ");
 					log("%-*s %11s %9s %*s\n", maxModelName+5, "Signal Name", "Dec", "Hex", maxModelWidth+3, "Bin");
 				}
-				log(max_timestep > 0 ? "  ---- " : "  ");
+				log("%s", max_timestep > 0 ? "  ---- " : "  ");
 				log("%*.*s %11.11s %9.9s %*.*s\n", maxModelName+5, maxModelName+5,
 						hline, hline, hline, maxModelWidth+3, maxModelWidth+3, hline);
 				last_timestep = info.timestep;
@@ -648,9 +656,9 @@ struct SatHelper
 				log("  ");
 
 			if (info.width <= 32 && !found_undef)
-				log("%-*s %11d %9x %*s\n", maxModelName+5, info.description.c_str(), value.as_int(), value.as_int(), maxModelWidth+3, value.as_string().c_str());
+				log("%-*s %11d %9x %*s\n", maxModelName+5, info.description, value.as_int(), value.as_int(), maxModelWidth+3, value.as_string());
 			else
-				log("%-*s %11s %9s %*s\n", maxModelName+5, info.description.c_str(), "--", "--", maxModelWidth+3, value.as_string().c_str());
+				log("%-*s %11s %9s %*s\n", maxModelName+5, info.description, "--", "--", maxModelWidth+3, value.as_string());
 		}
 
 		if (last_timestep == -2)
@@ -659,11 +667,12 @@ struct SatHelper
 
 	void dump_model_to_vcd(std::string vcd_file_name)
 	{
+		rewrite_filename(vcd_file_name);
 		FILE *f = fopen(vcd_file_name.c_str(), "w");
 		if (!f)
-			log_cmd_error("Can't open output file `%s' for writing: %s\n", vcd_file_name.c_str(), strerror(errno));
+			log_cmd_error("Can't open output file `%s' for writing: %s\n", vcd_file_name, strerror(errno));
 
-		log("Dumping SAT model to VCD file %s\n", vcd_file_name.c_str());
+		log("Dumping SAT model to VCD file %s\n", vcd_file_name);
 
 		time_t timestamp;
 		struct tm* now;
@@ -673,15 +682,15 @@ struct SatHelper
 		strftime(stime, sizeof(stime), "%c", now);
 
 		std::string module_fname = "unknown";
-		auto apos = module->attributes.find("\\src");
+		auto apos = module->attributes.find(ID::src);
 		if(apos != module->attributes.end())
-			module_fname = module->attributes["\\src"].decode_string();
+			module_fname = module->attributes[ID::src].decode_string();
 
 		fprintf(f, "$date\n");
 		fprintf(f, "    %s\n", stime);
 		fprintf(f, "$end\n");
 		fprintf(f, "$version\n");
-		fprintf(f, "    Generated by %s\n", yosys_version_str);
+		fprintf(f, "    Generated by %s\n", yosys_maybe_version());
 		fprintf(f, "$end\n");
 		fprintf(f, "$comment\n");
 		fprintf(f, "    Generated from SAT problem in module %s (declared at %s)\n",
@@ -727,13 +736,14 @@ struct SatHelper
 		int last_timestep = -2;
 		for (auto &info : modelInfo)
 		{
-			RTLIL::Const value;
-
+			RTLIL::Const::Builder value_builder(info.width);
 			for (int i = 0; i < info.width; i++) {
-				value.bits.push_back(modelValues.at(info.offset+i) ? RTLIL::State::S1 : RTLIL::State::S0);
+				RTLIL::State bit = modelValues.at(info.offset+i) ? RTLIL::State::S1 : RTLIL::State::S0;
 				if (enable_undef && modelValues.at(modelExpressions.size()/2 + info.offset + i))
-					value.bits.back() = RTLIL::State::Sx;
+					bit = RTLIL::State::Sx;
+				value_builder.push_back(bit);
 			}
+			RTLIL::Const value = value_builder.build();
 
 			if (info.timestep != last_timestep) {
 				if(last_timestep == 0)
@@ -744,11 +754,11 @@ struct SatHelper
 			}
 
 			if(info.width == 1) {
-				fprintf(f, "%c%s\n", bitvals[value.bits[0]], vcdnames[info.description].c_str());
+				fprintf(f, "%c%s\n", bitvals[value[0]], vcdnames[info.description].c_str());
 			} else {
 				fprintf(f, "b");
 				for(int k=info.width-1; k >= 0; k --)	//need to flip bit ordering for VCD
-					fprintf(f, "%c", bitvals[value.bits[k]]);
+					fprintf(f, "%c", bitvals[value[k]]);
 				fprintf(f, " %s\n", vcdnames[info.description].c_str());
 			}
 		}
@@ -756,28 +766,32 @@ struct SatHelper
 		if (last_timestep == -2)
 			log("  no model variables selected for display.\n");
 
+		fprintf(f, "#%d\n", last_timestep+1);
 		fclose(f);
 	}
 
 	void dump_model_to_json(std::string json_file_name)
 	{
+		rewrite_filename(json_file_name);
 		FILE *f = fopen(json_file_name.c_str(), "w");
 		if (!f)
-			log_cmd_error("Can't open output file `%s' for writing: %s\n", json_file_name.c_str(), strerror(errno));
+			log_cmd_error("Can't open output file `%s' for writing: %s\n", json_file_name, strerror(errno));
 
-		log("Dumping SAT model to WaveJSON file '%s'.\n", json_file_name.c_str());
+		log("Dumping SAT model to WaveJSON file '%s'.\n", json_file_name);
 
 		int mintime = 1, maxtime = 0, maxwidth = 0;;
 		dict<string, pair<int, dict<int, Const>>> wavedata;
 
 		for (auto &info : modelInfo)
 		{
-			Const value;
+			RTLIL::Const::Builder value_builder(info.width);
 			for (int i = 0; i < info.width; i++) {
-				value.bits.push_back(modelValues.at(info.offset+i) ? RTLIL::State::S1 : RTLIL::State::S0);
+				RTLIL::State bit = modelValues.at(info.offset+i) ? RTLIL::State::S1 : RTLIL::State::S0;
 				if (enable_undef && modelValues.at(modelExpressions.size()/2 + info.offset + i))
-					value.bits.back() = RTLIL::State::Sx;
+					bit = RTLIL::State::Sx;
+				value_builder.push_back(bit);
 			}
+			Const value = value_builder.build();
 
 			wavedata[info.description].first = info.width;
 			wavedata[info.description].second[info.timestep] = value;
@@ -795,7 +809,7 @@ struct SatHelper
 
 			vector<string> data;
 			string name = wd.first.c_str();
-			while (name.substr(0, 1) == "\\")
+			while (name.compare(0, 1, "\\") == 0)
 				name = name.substr(1);
 
 			fprintf(f, "    { \"name\": \"%s\", \"wave\": \"", name.c_str());
@@ -890,7 +904,12 @@ void print_qed()
 
 struct SatPass : public Pass {
 	SatPass() : Pass("sat", "solve a SAT problem in the circuit") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("formal");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -928,6 +947,9 @@ struct SatPass : public Pass {
 		log("\n");
 		log("    -set-def-inputs\n");
 		log("        add -set-def constraints for all module inputs\n");
+		log("\n");
+		log("    -set-def-formal\n");
+		log("        add -set-def constraints for formal $anyinit, $anyconst, $anyseq cells\n");
 		log("\n");
 		log("    -show <signal>\n");
 		log("        show the model for the specified signal. if no -show option is\n");
@@ -1057,14 +1079,14 @@ struct SatPass : public Pass {
 		log("        Like -falsify but do not return an error for timeouts.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		std::vector<std::pair<std::string, std::string>> sets, sets_init, prove, prove_x;
 		std::map<int, std::vector<std::pair<std::string, std::string>>> sets_at;
 		std::map<int, std::vector<std::string>> unsets_at, sets_def_at, sets_any_undef_at, sets_all_undef_at;
 		std::vector<std::string> shows, sets_def, sets_any_undef, sets_all_undef;
 		int loopcount = 0, seq_len = 0, maxsteps = 0, initsteps = 0, timeout = 0, prove_skip = 0;
-		bool verify = false, fail_on_timeout = false, enable_undef = false, set_def_inputs = false;
+		bool verify = false, fail_on_timeout = false, enable_undef = false, set_def_inputs = false, set_def_formal = false;
 		bool ignore_div_by_zero = false, set_init_undef = false, set_init_zero = false, max_undef = false;
 		bool tempinduct = false, prove_asserts = false, show_inputs = false, show_outputs = false;
 		bool show_regs = false, show_public = false, show_all = false;
@@ -1137,6 +1159,11 @@ struct SatPass : public Pass {
 				set_def_inputs = true;
 				continue;
 			}
+			if (args[argidx] == "-set-def-formal") {
+				enable_undef = true;
+				set_def_formal = true;
+				continue;
+			}
 			if (args[argidx] == "-set" && argidx+2 < args.size()) {
 				std::string lhs = args[++argidx];
 				std::string rhs = args[++argidx];
@@ -1169,6 +1196,7 @@ struct SatPass : public Pass {
 			if (args[argidx] == "-tempinduct-def") {
 				tempinduct = true;
 				tempinduct_def = true;
+				enable_undef = true;
 				continue;
 			}
 			if (args[argidx] == "-tempinduct-baseonly") {
@@ -1350,8 +1378,8 @@ struct SatPass : public Pass {
 		if (show_regs) {
 			pool<Wire*> reg_wires;
 			for (auto cell : module->cells()) {
-				if (cell->type == "$dff" || cell->type.substr(0, 6) == "$_DFF_")
-					for (auto bit : cell->getPort("\\Q"))
+				if (cell->type == ID($dff) || cell->type.begins_with("$_DFF_"))
+					for (auto bit : cell->getPort(ID::Q))
 						if (bit.wire)
 							reg_wires.insert(bit.wire);
 			}
@@ -1361,7 +1389,7 @@ struct SatPass : public Pass {
 
 		if (show_public) {
 			for (auto wire : module->wires())
-				if (wire->name[0] == '\\')
+				if (wire->name.isPublic())
 					shows.push_back(wire->name.str());
 		}
 
@@ -1375,8 +1403,8 @@ struct SatPass : public Pass {
 			if (loopcount > 0 || max_undef)
 				log_cmd_error("The options -max, -all, and -max_undef are not supported for temporal induction proofs!\n");
 
-			SatHelper basecase(design, module, enable_undef);
-			SatHelper inductstep(design, module, enable_undef);
+			SatHelper basecase(design, module, enable_undef, set_def_formal);
+			SatHelper inductstep(design, module, enable_undef, set_def_formal);
 
 			basecase.sets = sets;
 			basecase.set_assumes = set_assumes;
@@ -1504,11 +1532,12 @@ struct SatPass : public Pass {
 					{
 						if (!cnf_file_name.empty())
 						{
+							rewrite_filename(cnf_file_name);
 							FILE *f = fopen(cnf_file_name.c_str(), "w");
 							if (!f)
-								log_cmd_error("Can't open output file `%s' for writing: %s\n", cnf_file_name.c_str(), strerror(errno));
+								log_cmd_error("Can't open output file `%s' for writing: %s\n", cnf_file_name, strerror(errno));
 
-							log("Dumping CNF to file `%s'.\n", cnf_file_name.c_str());
+							log("Dumping CNF to file `%s'.\n", cnf_file_name);
 							cnf_file_name.clear();
 
 							inductstep.ez->printDIMACS(f, false);
@@ -1564,7 +1593,7 @@ struct SatPass : public Pass {
 			if (maxsteps > 0)
 				log_cmd_error("The options -maxsteps is only supported for temporal induction proofs!\n");
 
-			SatHelper sathelper(design, module, enable_undef);
+			SatHelper sathelper(design, module, enable_undef, set_def_formal);
 
 			sathelper.sets = sets;
 			sathelper.set_assumes = set_assumes;
@@ -1607,11 +1636,12 @@ struct SatPass : public Pass {
 
 			if (!cnf_file_name.empty())
 			{
+				rewrite_filename(cnf_file_name);
 				FILE *f = fopen(cnf_file_name.c_str(), "w");
 				if (!f)
-					log_cmd_error("Can't open output file `%s' for writing: %s\n", cnf_file_name.c_str(), strerror(errno));
+					log_cmd_error("Can't open output file `%s' for writing: %s\n", cnf_file_name, strerror(errno));
 
-				log("Dumping CNF to file `%s'.\n", cnf_file_name.c_str());
+				log("Dumping CNF to file `%s'.\n", cnf_file_name);
 				cnf_file_name.clear();
 
 				sathelper.ez->printDIMACS(f, false);

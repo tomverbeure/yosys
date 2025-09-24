@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -35,7 +35,7 @@ struct EquivPurgeWorker
 	{
 		if (sig.is_wire()) {
 			Wire *wire = sig.as_wire();
-			if (wire->name[0] == '\\') {
+			if (wire->name.isPublic()) {
 				if (!wire->port_output) {
 					log("  Module output: %s (%s)\n", log_signal(wire), log_id(cellname));
 					wire->port_output = true;
@@ -62,7 +62,7 @@ struct EquivPurgeWorker
 	{
 		if (sig.is_wire()) {
 			Wire *wire = sig.as_wire();
-			if (wire->name[0] == '\\') {
+			if (wire->name.isPublic()) {
 				if (!wire->port_output) {
 					log("  Module input: %s\n", log_signal(wire));
 					wire->port_input = true;
@@ -102,7 +102,7 @@ struct EquivPurgeWorker
 
 		for (auto cell : module->cells())
 		{
-			if (cell->type != "$equiv") {
+			if (cell->type != ID($equiv)) {
 				for (auto &port : cell->connections()) {
 					if (cell->input(port.first))
 						for (auto bit : sigmap(port.second))
@@ -114,9 +114,9 @@ struct EquivPurgeWorker
 				continue;
 			}
 
-			SigSpec sig_a = sigmap(cell->getPort("\\A"));
-			SigSpec sig_b = sigmap(cell->getPort("\\B"));
-			SigSpec sig_y = sigmap(cell->getPort("\\Y"));
+			SigSpec sig_a = sigmap(cell->getPort(ID::A));
+			SigSpec sig_b = sigmap(cell->getPort(ID::B));
+			SigSpec sig_y = sigmap(cell->getPort(ID::Y));
 
 			if (sig_a == sig_b)
 				continue;
@@ -130,7 +130,7 @@ struct EquivPurgeWorker
 			for (auto bit : sig_y)
 				visited.insert(bit);
 
-			cell->setPort("\\Y", make_output(sig_y, cell->name));
+			cell->setPort(ID::Y, make_output(sig_y, cell->name));
 		}
 
 		SigSpec srcsig;
@@ -167,8 +167,8 @@ struct EquivPurgeWorker
 				rewrite_sigmap.add(chunk, make_input(chunk));
 
 		for (auto cell : module->cells())
-			if (cell->type == "$equiv")
-				cell->setPort("\\Y", rewrite_sigmap(sigmap(cell->getPort("\\Y"))));
+			if (cell->type == ID($equiv))
+				cell->setPort(ID::Y, rewrite_sigmap(sigmap(cell->getPort(ID::Y))));
 
 		module->fixup_ports();
 	}
@@ -176,7 +176,7 @@ struct EquivPurgeWorker
 
 struct EquivPurgePass : public Pass {
 	EquivPurgePass() : Pass("equiv_purge", "purge equivalence checking module") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -187,7 +187,7 @@ struct EquivPurgePass : public Pass {
 		log("ports as needed.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, Design *design) override
 	{
 		log_header(design, "Executing EQUIV_PURGE pass.\n");
 

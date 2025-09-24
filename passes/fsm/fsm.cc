@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -27,7 +27,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 struct FsmPass : public Pass {
 	FsmPass() : Pass("fsm", "extract and optimize finite state machines") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -67,8 +67,17 @@ struct FsmPass : public Pass {
 		log("    -encfile file\n");
 		log("        passed through to fsm_recode pass\n");
 		log("\n");
+		log("This pass uses a subset of FF types to detect FSMs. Run 'opt -nosdff -nodffe'\n");
+		log("before this pass to prepare the design.\n");
+		log("\n");
+#ifdef YOSYS_ENABLE_VERIFIC
+		log("The Verific frontend may merge multiplexers in a way that interferes with FSM\n");
+		log("detection. Run 'verific -cfg db_infer_wide_muxes_post_elaboration 0' before\n");
+		log("reading the source, and 'bmuxmap' after 'proc' for best results.\n");
+		log("\n");
+#endif
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		bool flag_nomap = false;
 		bool flag_norecode = false;

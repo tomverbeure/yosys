@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -19,6 +19,7 @@
 
 #include "kernel/register.h"
 #include "kernel/sigtools.h"
+#include "kernel/ffinit.h"
 #include "kernel/consteval.h"
 #include "kernel/log.h"
 #include <sstream>
@@ -32,6 +33,7 @@ struct proc_dlatch_db_t
 {
 	Module *module;
 	SigMap sigmap;
+	FfInitVals initvals;
 
 	pool<Cell*> generated_dlatches;
 	dict<Cell*, vector<SigBit>> mux_srcbits;
@@ -40,18 +42,20 @@ struct proc_dlatch_db_t
 
 	proc_dlatch_db_t(Module *module) : module(module), sigmap(module)
 	{
+		initvals.set(&sigmap, module);
+
 		for (auto cell : module->cells())
 		{
-			if (cell->type.in("$mux", "$pmux"))
+			if (cell->type.in(ID($mux), ID($pmux), ID($bwmux)))
 			{
-				auto sig_y = sigmap(cell->getPort("\\Y"));
+				auto sig_y = sigmap(cell->getPort(ID::Y));
 				for (int i = 0; i < GetSize(sig_y); i++)
 					mux_drivers[sig_y[i]] = pair<Cell*, int>(cell, i);
 
 				pool<SigBit> mux_srcbits_pool;
-				for (auto bit : sigmap(cell->getPort("\\A")))
+				for (auto bit : sigmap(cell->getPort(ID::A)))
 					mux_srcbits_pool.insert(bit);
-				for (auto bit : sigmap(cell->getPort("\\B")))
+				for (auto bit : sigmap(cell->getPort(ID::B)))
 					mux_srcbits_pool.insert(bit);
 
 				vector<SigBit> mux_srcbits_vec;
@@ -69,9 +73,11 @@ struct proc_dlatch_db_t
 		}
 
 		for (auto wire : module->wires())
+		{
 			if (wire->port_input)
 				for (auto bit : sigmap(wire))
 					sigusers[bit]++;
+		}
 	}
 
 	bool quickcheck(const SigSpec &haystack, const SigSpec &needle)
@@ -121,11 +127,10 @@ struct proc_dlatch_db_t
 			return signal == other.signal && match == other.match && children == other.children;
 		}
 
-		unsigned int hash() const {
-			unsigned int h = mkhash_init;
-			mkhash(h, signal.hash());
-			mkhash(h, match.hash());
-			for (auto i : children) mkhash(h, i);
+		[[nodiscard]] Hasher hash_into(Hasher h) const {
+			h.eat(signal);
+			h.eat(match);
+			h.eat(children);
 			return h;
 		}
 	};
@@ -180,9 +185,11 @@ struct proc_dlatch_db_t
 		Cell *cell = it->second.first;
 		int index = it->second.second;
 
-		SigSpec sig_a = sigmap(cell->getPort("\\A"));
-		SigSpec sig_b = sigmap(cell->getPort("\\B"));
-		SigSpec sig_s = sigmap(cell->getPort("\\S"));
+		log_assert(cell->type.in(ID($mux), ID($pmux), ID($bwmux)));
+		bool is_bwmux = (cell->type == ID($bwmux));
+		SigSpec sig_a = sigmap(cell->getPort(ID::A));
+		SigSpec sig_b = sigmap(cell->getPort(ID::B));
+		SigSpec sig_s = sigmap(cell->getPort(ID::S));
 		int width = GetSize(sig_a);
 
 		pool<int> children;
@@ -190,24 +197,28 @@ struct proc_dlatch_db_t
 		int n = find_mux_feedback(sig_a[index], needle, set_undef);
 		if (n != false_node) {
 			if (set_undef && sig_a[index] == needle) {
-				SigSpec sig = cell->getPort("\\A");
+				SigSpec sig = cell->getPort(ID::A);
 				sig[index] = State::Sx;
-				cell->setPort("\\A", sig);
+				cell->setPort(ID::A, sig);
 			}
-			for (int i = 0; i < GetSize(sig_s); i++)
-				n = make_inner(sig_s[i], State::S0, n);
+			if (!is_bwmux) {
+				for (int i = 0; i < GetSize(sig_s); i++)
+					n = make_inner(sig_s[i], State::S0, n);
+			} else {
+				n = make_inner(sig_s[index], State::S0, n);
+			}
 			children.insert(n);
 		}
 
-		for (int i = 0; i < GetSize(sig_s); i++) {
+		for (int i = 0; i < (is_bwmux ? 1 : GetSize(sig_s)); i++) {
 			n = find_mux_feedback(sig_b[i*width + index], needle, set_undef);
 			if (n != false_node) {
 				if (set_undef && sig_b[i*width + index] == needle) {
-					SigSpec sig = cell->getPort("\\B");
+					SigSpec sig = cell->getPort(ID::B);
 					sig[i*width + index] = State::Sx;
-					cell->setPort("\\B", sig);
+					cell->setPort(ID::B, sig);
 				}
-				children.insert(make_inner(sig_s[i], State::S1, n));
+				children.insert(make_inner(sig_s[is_bwmux ? index : i], State::S1, n));
 			}
 		}
 
@@ -257,9 +268,9 @@ struct proc_dlatch_db_t
 
 	void fixup_mux(Cell *cell)
 	{
-		SigSpec sig_a = cell->getPort("\\A");
-		SigSpec sig_b = cell->getPort("\\B");
-		SigSpec sig_s = cell->getPort("\\S");
+		SigSpec sig_a = cell->getPort(ID::A);
+		SigSpec sig_b = cell->getPort(ID::B);
+		SigSpec sig_s = cell->getPort(ID::S);
 		SigSpec sig_any_valid_b;
 
 		SigSpec sig_new_b, sig_new_s;
@@ -278,18 +289,18 @@ struct proc_dlatch_db_t
 		}
 
 		if (sig_a.is_fully_undef() && !sig_any_valid_b.empty())
-			cell->setPort("\\A", sig_any_valid_b);
+			cell->setPort(ID::A, sig_any_valid_b);
 
 		if (GetSize(sig_new_s) == 1) {
-			cell->type = "$mux";
-			cell->unsetParam("\\S_WIDTH");
+			cell->type = ID($mux);
+			cell->unsetParam(ID::S_WIDTH);
 		} else {
-			cell->type = "$pmux";
-			cell->setParam("\\S_WIDTH", GetSize(sig_new_s));
+			cell->type = ID($pmux);
+			cell->setParam(ID::S_WIDTH, GetSize(sig_new_s));
 		}
 
-		cell->setPort("\\B", sig_new_b);
-		cell->setPort("\\S", sig_new_s);
+		cell->setPort(ID::B, sig_new_b);
+		cell->setPort(ID::S, sig_new_s);
 	}
 
 	void fixup_muxes()
@@ -317,7 +328,7 @@ struct proc_dlatch_db_t
 			pool<Cell*> next_queue;
 
 			for (auto cell : queue) {
-				if (cell->type.in("$mux", "$pmux"))
+				if (cell->type.in(ID($mux), ID($pmux)))
 					fixup_mux(cell);
 				for (auto bit : upstream_cell2net[cell])
 					for (auto cell : upstream_net2cell[bit])
@@ -336,7 +347,6 @@ struct proc_dlatch_db_t
 
 void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc)
 {
-	std::vector<RTLIL::SyncRule*> new_syncs;
 	RTLIL::SigSig latches_bits, nolatches_bits;
 	dict<SigBit, SigBit> latches_out_in;
 	dict<SigBit, int> latches_hold;
@@ -345,9 +355,12 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc)
 	for (auto sr : proc->syncs)
 	{
 		if (sr->type != RTLIL::SyncType::STa) {
-			new_syncs.push_back(sr);
 			continue;
 		}
+
+		if (proc->get_bool_attribute(ID::always_ff))
+			log_error("Found non edge/level sensitive event in always_ff process `%s.%s'.\n",
+					db.module->name.c_str(), proc->name.c_str());
 
 		for (auto ss : sr->actions)
 		{
@@ -363,8 +376,7 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc)
 			for (int i = 0; i < GetSize(ss.first); i++)
 				latches_out_in[ss.first[i]] = ss.second[i];
 		}
-
-		delete sr;
+		sr->actions.clear();
 	}
 
 	latches_out_in.sort();
@@ -383,8 +395,19 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc)
 	int offset = 0;
 	for (auto chunk : nolatches_bits.first.chunks()) {
 		SigSpec lhs = chunk, rhs = nolatches_bits.second.extract(offset, chunk.width);
-		log("No latch inferred for signal `%s.%s' from process `%s.%s'.\n",
-				db.module->name.c_str(), log_signal(lhs), db.module->name.c_str(), proc->name.c_str());
+		if (proc->get_bool_attribute(ID::always_latch))
+			log_error("No latch inferred for signal `%s.%s' from always_latch process `%s.%s'.\n",
+					db.module->name.c_str(), log_signal(lhs), db.module->name.c_str(), proc->name.c_str());
+		else
+			log("No latch inferred for signal `%s.%s' from process `%s.%s'.\n",
+					db.module->name.c_str(), log_signal(lhs), db.module->name.c_str(), proc->name.c_str());
+		for (auto &bit : lhs) {
+			State val = db.initvals(bit);
+			if (db.initvals(bit) != State::Sx) {
+				log("Removing init bit %s for non-memory siginal `%s.%s` in process `%s.%s`.\n", log_signal(val), db.module->name, log_signal(bit), db.module->name, proc->name);
+			}
+			db.initvals.remove_init(bit);
+		}
 		db.module->connect(lhs, rhs);
 		offset += chunk.width;
 	}
@@ -410,19 +433,21 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc)
 			cell->set_src_attribute(src);
 			db.generated_dlatches.insert(cell);
 
-			log("Latch inferred for signal `%s.%s' from process `%s.%s': %s\n",
-					db.module->name.c_str(), log_signal(lhs), db.module->name.c_str(), proc->name.c_str(), log_id(cell));
+			if (proc->get_bool_attribute(ID::always_comb))
+				log_error("Latch inferred for signal `%s.%s' from always_comb process `%s.%s'.\n",
+						db.module->name.c_str(), log_signal(lhs), db.module->name.c_str(), proc->name.c_str());
+			else
+				log("Latch inferred for signal `%s.%s' from process `%s.%s': %s\n",
+						db.module->name.c_str(), log_signal(lhs), db.module->name.c_str(), proc->name.c_str(), log_id(cell));
 		}
 
 		offset += width;
 	}
-
-	new_syncs.swap(proc->syncs);
 }
 
 struct ProcDlatchPass : public Pass {
 	ProcDlatchPass() : Pass("proc_dlatch", "extract latches from processes") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -432,17 +457,16 @@ struct ProcDlatchPass : public Pass {
 		log("d-type latches.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing PROC_DLATCH pass (convert process syncs to latches).\n");
 
 		extra_args(args, 1, design);
 
-		for (auto module : design->selected_modules()) {
-			proc_dlatch_db_t db(module);
-			for (auto &proc_it : module->processes)
-				if (design->selected(module, proc_it.second))
-					proc_dlatch(db, proc_it.second);
+		for (auto mod : design->all_selected_modules()) {
+			proc_dlatch_db_t db(mod);
+			for (auto proc : mod->selected_processes())
+				proc_dlatch(db, proc);
 			db.fixup_muxes();
 		}
 	}

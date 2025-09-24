@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -21,13 +21,10 @@
 // Tarjan, R. E. (1972), "Depth-first search and linear graph algorithms", SIAM Journal on Computing 1 (2): 146-160, doi:10.1137/0201010
 // http://en.wikipedia.org/wiki/Tarjan's_strongly_connected_components_algorithm
 
-#include "kernel/register.h"
+#include "kernel/yosys.h"
 #include "kernel/celltypes.h"
 #include "kernel/sigtools.h"
-#include "kernel/log.h"
-#include <stdlib.h>
-#include <stdio.h>
-#include <set>
+#include "kernel/log_help.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -37,20 +34,20 @@ struct SccWorker
 	RTLIL::Design *design;
 	RTLIL::Module *module;
 	SigMap sigmap;
-	CellTypes ct;
+	CellTypes ct, specifyCells;
 
-	std::set<RTLIL::Cell*> workQueue;
-	std::map<RTLIL::Cell*, std::set<RTLIL::Cell*>> cellToNextCell;
-	std::map<RTLIL::Cell*, RTLIL::SigSpec> cellToPrevSig, cellToNextSig;
+	pool<RTLIL::Cell*> workQueue;
+	dict<RTLIL::Cell*, pool<RTLIL::Cell*>> cellToNextCell;
+	dict<RTLIL::Cell*, RTLIL::SigSpec> cellToPrevSig, cellToNextSig;
 
-	std::map<RTLIL::Cell*, std::pair<int, int>> cellLabels;
-	std::map<RTLIL::Cell*, int> cellDepth;
-	std::set<RTLIL::Cell*> cellsOnStack;
+	dict<RTLIL::Cell*, std::pair<int, int>> cellLabels;
+	dict<RTLIL::Cell*, int> cellDepth;
+	pool<RTLIL::Cell*> cellsOnStack;
 	std::vector<RTLIL::Cell*> cellStack;
 	int labelCounter;
 
-	std::map<RTLIL::Cell*, int> cell2scc;
-	std::vector<std::set<RTLIL::Cell*>> sccList;
+	dict<RTLIL::Cell*, int> cell2scc;
+	std::vector<pool<RTLIL::Cell*>> sccList;
 
 	void run(RTLIL::Cell *cell, int depth, int maxDepth)
 	{
@@ -85,7 +82,7 @@ struct SccWorker
 			else
 			{
 				log("Found an SCC:");
-				std::set<RTLIL::Cell*> scc;
+				pool<RTLIL::Cell*> scc;
 				while (cellsOnStack.count(cell) > 0) {
 					RTLIL::Cell *c = cellStack.back();
 					cellStack.pop_back();
@@ -100,11 +97,11 @@ struct SccWorker
 		}
 	}
 
-	SccWorker(RTLIL::Design *design, RTLIL::Module *module, bool nofeedbackMode, bool allCellTypes, int maxDepth) :
+	SccWorker(RTLIL::Design *design, RTLIL::Module *module, bool nofeedbackMode, bool allCellTypes, bool specifyMode, int maxDepth) :
 			design(design), module(module), sigmap(module)
 	{
 		if (module->processes.size() > 0) {
-			log("Skipping module %s as it contains processes (run 'proc' pass first).\n", module->name.c_str());
+			log("Skipping module %s as it contains processes (run 'proc' pass first).\n", module->name);
 			return;
 		}
 
@@ -113,6 +110,18 @@ struct SccWorker
 		} else {
 			ct.setup_internals();
 			ct.setup_stdcells();
+		}
+
+		// Discover boxes with specify rules in them, for special handling.
+		if (specifyMode) {
+			for (auto mod : design->modules())
+				if (mod->get_blackbox_attribute(false))
+					for (auto cell : mod->cells())
+						if (cell->type == ID($specify2))
+						{
+							specifyCells.setup_module(mod);
+							break;
+						}
 		}
 
 		SigPool selectedSignals;
@@ -129,29 +138,52 @@ struct SccWorker
 			if (!design->selected(module, cell))
 				continue;
 
-			if (!allCellTypes && !ct.cell_known(cell->type))
+			if (!allCellTypes && !ct.cell_known(cell->type) && !specifyCells.cell_known(cell->type))
 				continue;
 
 			workQueue.insert(cell);
 
 			RTLIL::SigSpec inputSignals, outputSignals;
 
-			for (auto &conn : cell->connections())
-			{
-				bool isInput = true, isOutput = true;
+			if (specifyCells.cell_known(cell->type)) {
+				// Use specify rules of the type `(X => Y) = NN` to look for asynchronous paths in boxes.
+				for (auto subcell : design->module(cell->type)->cells())
+				{
+					if (subcell->type != ID($specify2))
+						continue;
 
-				if (ct.cell_known(cell->type)) {
-					isInput = ct.cell_input(cell->type, conn.first);
-					isOutput = ct.cell_output(cell->type, conn.first);
+					for (auto bit : subcell->getPort(ID::SRC))
+					{
+						if (!bit.wire || !cell->hasPort(bit.wire->name))
+							continue;
+						inputSignals.append(sigmap(cell->getPort(bit.wire->name)));
+					}
+
+					for (auto bit : subcell->getPort(ID::DST))
+					{
+						if (!bit.wire || !cell->hasPort(bit.wire->name))
+							continue;
+						outputSignals.append(sigmap(cell->getPort(bit.wire->name)));
+					}
 				}
+			} else {
+				for (auto &conn : cell->connections())
+				{
+					bool isInput = true, isOutput = true;
 
-				RTLIL::SigSpec sig = selectedSignals.extract(sigmap(conn.second));
-				sig.sort_and_unify();
+					if (ct.cell_known(cell->type)) {
+						isInput = ct.cell_input(cell->type, conn.first);
+						isOutput = ct.cell_output(cell->type, conn.first);
+					}
 
-				if (isInput)
-					inputSignals.append(sig);
-				if (isOutput)
-					outputSignals.append(sig);
+					RTLIL::SigSpec sig = selectedSignals.extract(sigmap(conn.second));
+					sig.sort_and_unify();
+
+					if (isInput)
+						inputSignals.append(sig);
+					if (isOutput)
+						outputSignals.append(sig);
+				}
 			}
 
 			inputSignals.sort_and_unify();
@@ -164,11 +196,11 @@ struct SccWorker
 
 		for (auto cell : workQueue)
 		{
-			cellToNextCell[cell] = sigToNextCells.find(cellToNextSig[cell]);
+			sigToNextCells.find(cellToNextSig[cell], cellToNextCell[cell]);
 
 			if (!nofeedbackMode && cellToNextCell[cell].count(cell)) {
 				log("Found an SCC:");
-				std::set<RTLIL::Cell*> scc;
+				pool<RTLIL::Cell*> scc;
 				log(" %s", RTLIL::id2cstr(cell->name));
 				cell2scc[cell] = sccList.size();
 				scc.insert(cell);
@@ -196,7 +228,7 @@ struct SccWorker
 	{
 		for (int i = 0; i < int(sccList.size()); i++)
 		{
-			std::set<RTLIL::Cell*> &cells = sccList[i];
+			pool<RTLIL::Cell*> &cells = sccList[i];
 			RTLIL::SigSpec prevsig, nextsig, sig;
 
 			for (auto cell : cells) {
@@ -218,7 +250,12 @@ struct SccWorker
 
 struct SccPass : public Pass {
 	SccPass() : Pass("scc", "detect strongly connected components (logic loops)") { }
-	void help() YS_OVERRIDE
+	bool formatted_help() override {
+		auto *help = PrettyHelp::get_current();
+		help->set_group("passes/status");
+		return false;
+	}
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -228,7 +265,7 @@ struct SccPass : public Pass {
 		log("design.\n");
 		log("\n");
 		log("    -expect <num>\n");
-		log("        expect to find exactly <num> SSCs. A different number of SSCs will\n");
+		log("        expect to find exactly <num> SCCs. A different number of SCCs will\n");
 		log("        produce an error.\n");
 		log("\n");
 		log("    -max_depth <num>\n");
@@ -254,13 +291,17 @@ struct SccPass : public Pass {
 		log("        replace the current selection with a selection of all cells and wires\n");
 		log("        that are part of a found logic loop\n");
 		log("\n");
+		log("    -specify\n");
+		log("        examine specify rules to detect logic loops in whitebox/blackbox cells\n");
+		log("\n");
 	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		std::map<std::string, std::string> setAttr;
+		dict<std::string, std::string> setAttr;
 		bool allCellTypes = false;
 		bool selectMode = false;
 		bool nofeedbackMode = false;
+		bool specifyMode = false;
 		int maxDepth = -1;
 		int expect = -1;
 
@@ -293,49 +334,52 @@ struct SccPass : public Pass {
 				selectMode = true;
 				continue;
 			}
+			if (args[argidx] == "-specify") {
+				specifyMode = true;
+				continue;
+			}
 			break;
 		}
 		int origSelectPos = design->selection_stack.size() - 1;
 		extra_args(args, argidx, design);
 
-		RTLIL::Selection newSelection(false);
+		auto newSelection = RTLIL::Selection::EmptySelection(design);
 		int scc_counter = 0;
 
-		for (auto &mod_it : design->modules_)
-			if (design->selected(mod_it.second))
+		for (auto mod : design->selected_modules())
+		{
+			SccWorker worker(design, mod, nofeedbackMode, allCellTypes, specifyMode, maxDepth);
+
+			if (!setAttr.empty())
 			{
-				SccWorker worker(design, mod_it.second, nofeedbackMode, allCellTypes, maxDepth);
-
-				if (!setAttr.empty())
+				for (const auto &cells : worker.sccList)
 				{
-					for (const auto &cells : worker.sccList)
+					for (auto attr : setAttr)
 					{
-						for (auto attr : setAttr)
-						{
-							IdString attr_name(RTLIL::escape_id(attr.first));
-							string attr_valstr = attr.second;
-							string index = stringf("%d", scc_counter);
+						IdString attr_name(RTLIL::escape_id(attr.first));
+						string attr_valstr = attr.second;
+						string index = stringf("%d", scc_counter);
 
-							for (size_t pos = 0; (pos = attr_valstr.find("{}", pos)) != string::npos; pos += index.size())
-								attr_valstr.replace(pos, 2, index);
+						for (size_t pos = 0; (pos = attr_valstr.find("{}", pos)) != string::npos; pos += index.size())
+							attr_valstr.replace(pos, 2, index);
 
-							Const attr_value(attr_valstr);
+						Const attr_value(attr_valstr);
 
-							for (auto cell : cells)
-								cell->attributes[attr_name] = attr_value;
-						}
-
-						scc_counter++;
+						for (auto cell : cells)
+							cell->attributes[attr_name] = attr_value;
 					}
-				}
-				else
-				{
-					scc_counter += GetSize(worker.sccList);
-				}
 
-				if (selectMode)
-					worker.select(newSelection);
+					scc_counter++;
+				}
 			}
+			else
+			{
+				scc_counter += GetSize(worker.sccList);
+			}
+
+			if (selectMode)
+				worker.select(newSelection);
+		}
 
 		if (expect >= 0) {
 			if (scc_counter == expect)

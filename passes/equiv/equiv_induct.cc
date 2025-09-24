@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -37,14 +37,15 @@ struct EquivInductWorker
 
 	int max_seq;
 	int success_counter;
+	bool set_assumes;
 
 	dict<int, int> ez_step_is_consistent;
 	pool<Cell*> cell_warn_cache;
 	SigPool undriven_signals;
 
-	EquivInductWorker(Module *module, const pool<Cell*> &unproven_equiv_cells, bool model_undef, int max_seq) : module(module), sigmap(module),
+	EquivInductWorker(Module *module, const pool<Cell*> &unproven_equiv_cells, bool model_undef, int max_seq, bool set_assumes) : module(module), sigmap(module),
 			cells(module->selected_cells()), workset(unproven_equiv_cells),
-			satgen(ez.get(), &sigmap), max_seq(max_seq), success_counter(0)
+			satgen(ez.get(), &sigmap), max_seq(max_seq), success_counter(0), set_assumes(set_assumes)
 	{
 		satgen.model_undef = model_undef;
 	}
@@ -55,21 +56,36 @@ struct EquivInductWorker
 
 		for (auto cell : cells) {
 			if (!satgen.importCell(cell, step) && !cell_warn_cache.count(cell)) {
-				log_warning("No SAT model available for cell %s (%s).\n", log_id(cell), log_id(cell->type));
+				if (cell->is_builtin_ff())
+					log_warning("No SAT model available for async FF cell %s (%s).  Consider running `async2sync` or `clk2fflogic` first.\n", log_id(cell), log_id(cell->type));
+				else
+					log_warning("No SAT model available for cell %s (%s).\n", log_id(cell), log_id(cell->type));
 				cell_warn_cache.insert(cell);
 			}
-			if (cell->type == "$equiv") {
-				SigBit bit_a = sigmap(cell->getPort("\\A")).as_bit();
-				SigBit bit_b = sigmap(cell->getPort("\\B")).as_bit();
+			if (cell->type == ID($equiv)) {
+				SigBit bit_a = sigmap(cell->getPort(ID::A)).as_bit();
+				SigBit bit_b = sigmap(cell->getPort(ID::B)).as_bit();
 				if (bit_a != bit_b) {
 					int ez_a = satgen.importSigBit(bit_a, step);
 					int ez_b = satgen.importSigBit(bit_b, step);
 					int cond = ez->IFF(ez_a, ez_b);
-					if (satgen.model_undef)
+					if (satgen.model_undef) {
+						cond = ez->AND(cond, ez->NOT(satgen.importUndefSigBit(bit_b, step)));
 						cond = ez->OR(cond, satgen.importUndefSigBit(bit_a, step));
+					}
 					ez_equal_terms.push_back(cond);
 				}
 			}
+		}
+
+		if (set_assumes) {
+			if (step == 1) {
+				RTLIL::SigSpec assumes_a, assumes_en;
+				satgen.getAssumes(assumes_a, assumes_en, step);
+				for (int i = 0; i < GetSize(assumes_a); i++)
+					log("Import constraint from assume cell: %s when %s.\n", log_signal(assumes_a[i]), log_signal(assumes_en[i]));
+			}
+			ez->assume(satgen.importAssumes(step));
 		}
 
 		if (satgen.model_undef) {
@@ -125,7 +141,7 @@ struct EquivInductWorker
 			if (!ez->solve(new_step_not_consistent)) {
 				log("  Proof for induction step holds. Entire workset of %d cells proven!\n", GetSize(workset));
 				for (auto cell : workset)
-					cell->setPort("\\B", cell->getPort("\\A"));
+					cell->setPort(ID::B, cell->getPort(ID::A));
 				success_counter += GetSize(workset);
 				return;
 			}
@@ -137,10 +153,10 @@ struct EquivInductWorker
 
 		for (auto cell : workset)
 		{
-			SigBit bit_a = sigmap(cell->getPort("\\A")).as_bit();
-			SigBit bit_b = sigmap(cell->getPort("\\B")).as_bit();
+			SigBit bit_a = sigmap(cell->getPort(ID::A)).as_bit();
+			SigBit bit_b = sigmap(cell->getPort(ID::B)).as_bit();
 
-			log("  Trying to prove $equiv for %s:", log_signal(sigmap(cell->getPort("\\Y"))));
+			log("  Trying to prove $equiv for %s:", log_signal(sigmap(cell->getPort(ID::Y))));
 
 			int ez_a = satgen.importSigBit(bit_a, max_seq+1);
 			int ez_b = satgen.importSigBit(bit_b, max_seq+1);
@@ -151,7 +167,7 @@ struct EquivInductWorker
 
 			if (!ez->solve(cond)) {
 				log(" success!\n");
-				cell->setPort("\\B", cell->getPort("\\A"));
+				cell->setPort(ID::B, cell->getPort(ID::A));
 				success_counter++;
 			} else {
 				log(" failed.\n");
@@ -162,7 +178,7 @@ struct EquivInductWorker
 
 struct EquivInductPass : public Pass {
 	EquivInductPass() : Pass("equiv_induct", "proving $equiv cells using temporal induction") { }
-	void help() YS_OVERRIDE
+	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
@@ -179,6 +195,9 @@ struct EquivInductPass : public Pass {
 		log("    -seq <N>\n");
 		log("        the max. number of time steps to be considered (default = 4)\n");
 		log("\n");
+		log("    -set-assumes\n");
+		log("        set all assumptions provided via $assume cells\n");
+		log("\n");
 		log("This command is very effective in proving complex sequential circuits, when\n");
 		log("the internal state of the circuit quickly propagates to $equiv cells.\n");
 		log("\n");
@@ -192,10 +211,10 @@ struct EquivInductPass : public Pass {
 		log("after reset.\n");
 		log("\n");
 	}
-	void execute(std::vector<std::string> args, Design *design) YS_OVERRIDE
+	void execute(std::vector<std::string> args, Design *design) override
 	{
 		int success_counter = 0;
-		bool model_undef = false;
+		bool model_undef = false, set_assumes = false;
 		int max_seq = 4;
 
 		log_header(design, "Executing EQUIV_INDUCT pass.\n");
@@ -210,6 +229,10 @@ struct EquivInductPass : public Pass {
 				max_seq = atoi(args[++argidx].c_str());
 				continue;
 			}
+			if (args[argidx] == "-set-assumes") {
+				set_assumes = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
@@ -217,10 +240,11 @@ struct EquivInductPass : public Pass {
 		for (auto module : design->selected_modules())
 		{
 			pool<Cell*> unproven_equiv_cells;
+			vector<Cell*> assume_cells;
 
 			for (auto cell : module->selected_cells())
-				if (cell->type == "$equiv") {
-					if (cell->getPort("\\A") != cell->getPort("\\B"))
+				if (cell->type == ID($equiv)) {
+					if (cell->getPort(ID::A) != cell->getPort(ID::B))
 						unproven_equiv_cells.insert(cell);
 				}
 
@@ -229,7 +253,7 @@ struct EquivInductPass : public Pass {
 				continue;
 			}
 
-			EquivInductWorker worker(module, unproven_equiv_cells, model_undef, max_seq);
+			EquivInductWorker worker(module, unproven_equiv_cells, model_undef, max_seq, set_assumes);
 			worker.run();
 			success_counter += worker.success_counter;
 		}

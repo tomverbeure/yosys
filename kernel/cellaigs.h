@@ -1,7 +1,7 @@
 /*
  *  yosys -- Yosys Open SYnthesis Suite
  *
- *  Copyright (C) 2012  Clifford Wolf <clifford@clifford.at>
+ *  Copyright (C) 2012  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -34,7 +34,7 @@ struct AigNode
 
 	AigNode();
 	bool operator==(const AigNode &other) const;
-	unsigned int hash() const;
+	[[nodiscard]] Hasher hash_into(Hasher h) const;
 };
 
 struct Aig
@@ -44,7 +44,7 @@ struct Aig
 	Aig(Cell *cell);
 
 	bool operator==(const Aig &other) const;
-	unsigned int hash() const;
+	[[nodiscard]] Hasher hash_into(Hasher h) const;
 };
 
 YOSYS_NAMESPACE_END
