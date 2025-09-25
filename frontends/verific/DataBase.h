@@ -31,11 +31,14 @@ namespace Verific {
         PRIM_XOR,
         PRIM_XNOR,
         PRIM_BUF,
+        PRIM_BUFIF1,
         PRIM_INV,
         PRIM_MUX,
         PRIM_TRI,
         PRIM_FADD,
+        PRIM_DFF,
         PRIM_DFFRS,
+        PRIM_DLATCH,
         PRIM_DLATCHRS,
         PRIM_PWR,
         PRIM_GND,
@@ -55,6 +58,7 @@ namespace Verific {
         OPER_REDUCE_XOR,
         OPER_REDUCE_XNOR,
         OPER_REDUCE_NOR,
+        OPER_REDUCE_NAND,
         OPER_LESSTHAN,
         OPER_WIDE_AND,
         OPER_WIDE_OR,
@@ -73,7 +77,11 @@ namespace Verific {
         OPER_SELECTOR,
         OPER_WIDE_SELECTOR,
         OPER_WIDE_TRI,
+        OPER_WIDE_DFF,
         OPER_WIDE_DFFRS,
+        OPER_WIDE_DLATCH,
+        OPER_WIDE_DLATCHRS,
+        OPER_WIDE_CASE_SELECT_BOX,
         OPER_READ_PORT,
         OPER_WRITE_PORT,
         OPER_CLOCKED_WRITE_PORT,
@@ -102,7 +110,8 @@ namespace Verific {
     typedef enum {
         DIR_IN,
         DIR_OUT,
-        DIR_INOUT
+        DIR_INOUT,
+        DIR_NONE
     } port_dir_t;
 
     static const std::string str_glb_empty = "str_glb_empty";
@@ -122,6 +131,9 @@ namespace Verific {
     class VhdlDesignUnit;
     class Message;
     class TypeRange;
+    class Oper;
+    class OperWideCaseSelector;
+    class Array;
 
     typedef bool linefile_type;
 
@@ -129,16 +141,6 @@ namespace Verific {
     class InstanceList {
         public:
         Instance * GetLast() { return nullptr; };
-    };
-
-    class Array {
-        public:
-        void InsertLast(VhdlLibrary *) { };
-        void InsertLast(VhdlDesignUnit *) { };
-        void InsertLast(VeriLibrary *) { };
-        void InsertLast(VeriModule *) { };
-        void InsertLast(const char *) { };
-        void Insert(const char *) { };
     };
 
     class MapIter {
@@ -153,6 +155,8 @@ namespace Verific {
         const char * Name() { return char_glb_empty; };
         const char * GetAttValue(const char *) { return char_glb_empty; };
         linefile_type Linefile() { return false; };
+        bool IsFromVhdl() { return false; };
+        bool GetAtt(const char *) { return false; };
     };
 
     class Att : public DesignObj  {
@@ -165,6 +169,12 @@ namespace Verific {
         public: 
         int LeftRangeBound() { return 0; };
         int RightRangeBound() { return 0; };
+        long long GetScalarRangeLeftBound() { return 0; };
+        long long GetScalarRangeRightBound() { return 0; };
+        bool IsTypeScalar() { return false; };
+        bool IsTypeEnum() { return false; };
+        const char * GetTypeName() const { return nullptr; };
+        MapIter * GetEnumIdMap() { return nullptr; };
     };
 
     class NetBus : public DesignObj {
@@ -184,8 +194,11 @@ namespace Verific {
         Netlist * Owner() { return nullptr; };
         bool IsGnd() { return false; };
         bool IsPwr() { return false; };
+        bool IsX() { return false; };
         bool IsRamNet() { return false; };
         bool IsUserDeclared() { return false; };
+        bool IsConstant() { return false; };
+        bool IsMultipleDriven() { return false; };
         int Size() { return 0; };
         char GetInitialValue() { return '0'; };
         const char * GetWideInitialValue() { return char_glb_empty; };
@@ -193,7 +206,7 @@ namespace Verific {
         NetBus * Bus() { return nullptr; };
         void Connect(Port *) { };
         TypeRange * GetOrigTypeRange() { return nullptr; };
-        bool IsMultipleDriven() { return false; };
+        void BlastNet() { };
     };
 
     class PortBus : public DesignObj {
@@ -247,6 +260,8 @@ namespace Verific {
         Net * GetReset() { return nullptr; };
         Net * GetNet(int i){ return nullptr; };
         Net * GetNet(Port *){ return nullptr; };
+        Net * GetAsyncCond(){ return nullptr; };
+        Net * GetAsyncVal(){ return nullptr; };
         inst_type_t Type() { return PRIM_INV; };
         bool IsUserDeclared() { return false; };
         bool IsOperator() { return false; };
@@ -261,16 +276,21 @@ namespace Verific {
         int NumOfRefs() { return 0; }
         std::string CellBaseName() { return str_glb_empty; }
         bool IsBlackBox() { return false; }
+        bool IsEmptyBox() { return false; }
         PortBus * GetPortBus(const char *) { return nullptr; };
         Port * GetPort(const char *) { return nullptr; };
         bool IsSigned() { return false; };
         bool IsOperator() { return false; };
+        bool IsPrimitive() { return false; };
         Instance * Owner() { return nullptr; };
         int IndexOf(Port *) { return 0; };
         void Add(Port *) { };
         void Add(Net *) { };
         void Flatten() { };
+        TypeRange * GetTypeRange(const char *) { return nullptr; }
         static Netlist * PresentDesign() { return nullptr; };       // Current active design
+        bool IsFromVerilog() { return true; };
+        void RemoveDanglingLogic(int) { };
     };
 
 
@@ -315,6 +335,17 @@ namespace Verific {
         public:
         static void SetVar(const char *, int) { };
     };
+
+    class Oper {
+        public:
+    };
+
+    class OperWideCaseSelector : public Oper {
+        public:
+        unsigned GetNumBranches() { return 0; };
+        unsigned GetNumConditions(int) { return 0; };
+        void GetCondition(int, int, Array *, Array *) { };
+    };
 }
 
 #define FOREACH_ATTRIBUTE(obj, mapIter, attr) attr = nullptr; for(int iii=0;iii<2;++iii)
@@ -324,8 +355,12 @@ namespace Verific {
 #define FOREACH_NETBUS_OF_NETLIST(nl, mapIter, netBus) netBus = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_PORTREF_OF_NET(net, mapIter, portRef) portRef = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_INSTANCE_OF_NETLIST(nl, mapIter, inst) inst = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_PARAMETER_OF_NETLIST(nl, mapIter, param_name, param_value) for(int iii=0;iii<2;++iii)
 #define FOREACH_PORTREF_OF_INST(inst, mapIter, portRef) portRef = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_ARRAY_ITEM(array, i, item) item = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_MAP_ITEM(map, i, key, value) *key = nullptr; *value=nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_PORT_OF_PORTBUS(portbus, setIter, port) port = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_NET_OF_NETBUS(netbus, mapIter, net) net = nullptr; for(int iii=0;iii<2;++iii)
 
 #pragma GCC diagnostic pop
 
