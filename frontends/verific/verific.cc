@@ -2564,7 +2564,7 @@ Cell *VerificClocking::addAldff(IdString name, RTLIL::SigSpec sig_aload, RTLIL::
 			if (c.wire && c.wire->attributes.count(ID::init)) {
 				Const val = c.wire->attributes.at(ID::init);
 				for (int i = 0; i < GetSize(c); i++)
-					initval.bits()[offset+i] = val[c.offset+i];
+					initval.to_bits()[offset+i] = val[c.offset+i];
 			}
 			offset += GetSize(c);
 		}

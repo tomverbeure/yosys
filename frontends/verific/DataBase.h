@@ -127,6 +127,7 @@ namespace Verific {
     class PortRef;
     class VeriLibrary;
     class VeriModule;
+    class VeriName;
     class VhdlLibrary;
     class VhdlDesignUnit;
     class Message;
@@ -141,6 +142,11 @@ namespace Verific {
     class InstanceList {
         public:
         Instance * GetLast() { return nullptr; };
+    };
+
+    class Map {
+        public:
+        int Size() { return 0; };
     };
 
     class MapIter {
@@ -163,6 +169,25 @@ namespace Verific {
         public:
         const char * Key() { return char_glb_empty; }
         const char * Value() { return char_glb_empty; }
+    };
+
+    class VeriModule : DesignObj {
+        public:
+        bool IsConfiguration() { return false; };
+        VeriLibrary * GetLibrary() { return nullptr; };
+        const char * GetName() { return nullptr; };
+    };
+
+    class VeriConfiguration : public VeriModule {
+        public:
+        Array * GetTopModuleNames() { return nullptr; };
+    };
+
+    class VeriName : public DesignObj {
+        public:
+        bool IsHierName() { return false; };
+        VeriName * GetPrefix() { return nullptr; };
+        const char * GetName() { return nullptr; };
     };
 
     class TypeRange {
@@ -226,6 +251,7 @@ namespace Verific {
         PortBus * Bus() { return nullptr; };
         port_dir_t GetDir() { return DIR_INOUT; };
         Net *GetNet() { return nullptr; };
+        bool IsOutput() { return false; };
     };
 
     class PortRef {
@@ -270,6 +296,22 @@ namespace Verific {
         void Disconnect(Port *) { };
     };
 
+    class Cell : public DesignObj {
+        public:
+    };
+
+    class Library : public DesignObj {
+        public: 
+        static Library * Primitives() { return nullptr; };
+        static Library * Operators() { return nullptr; };
+    };
+
+    class Libset : public DesignObj {
+        public:
+        static void Reset() {};
+        static Libset * Global() { return nullptr; };
+    };
+
     class Netlist : public DesignObj {
         public:
         InstanceList *GetReferences() { return nullptr; };
@@ -291,6 +333,7 @@ namespace Verific {
         static Netlist * PresentDesign() { return nullptr; };       // Current active design
         bool IsFromVerilog() { return true; };
         void RemoveDanglingLogic(int) { };
+        Net * Buf(Net *) { return nullptr; };
     };
 
 
@@ -315,20 +358,19 @@ namespace Verific {
     class VeriLibrary {
         public:
         VeriModule * GetModule(const char *) { return nullptr; };
+        VeriModule * GetModule(const char *, int) { return nullptr; };
     };
 
-    class Libset {
-        public:
-        static void Reset() {};
-    };
 
     class Message {
         public:
         static void SetConsoleOutput(int) { };
         static void SetMessageType(const char *, msg_type_t) { };
+        static void ClearMessageType(const char *) { };
         static void RegisterCallBackMsg(void (&)(msg_type_t, const char*, linefile_type, const char *, va_list)) { };
         static const char * ReleaseString() { return nullptr; };
         static time_t ReleaseDate() { time_t raw_time; time(&raw_time); return raw_time; };
+        static msg_type_t GetMessageType(const char *) { return VERIFIC_NONE; };
     };
 
     class RuntimeFlags {
@@ -351,16 +393,21 @@ namespace Verific {
 #define FOREACH_ATTRIBUTE(obj, mapIter, attr) attr = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_PORT_OF_NETLIST(nl, mapIter, port) port = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_PORTBUS_OF_NETLIST(nl, mapIter, portBus) portBus = nullptr; for(int iii=0;iii<2;++iii)
-#define FOREACH_NET_OF_NETLIST(nl, mapIter, net) for(int iii=0;iii<2;++iii)
+#define FOREACH_NET_OF_NETLIST(nl, mapIter, net) net = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_NETBUS_OF_NETLIST(nl, mapIter, netBus) netBus = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_PORTREF_OF_NET(net, mapIter, portRef) portRef = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_INSTANCE_OF_NETLIST(nl, mapIter, inst) inst = nullptr; for(int iii=0;iii<2;++iii)
-#define FOREACH_PARAMETER_OF_NETLIST(nl, mapIter, param_name, param_value) for(int iii=0;iii<2;++iii)
+#define FOREACH_PARAMETER_OF_NETLIST(nl, mapIter, param_name, param_value) param_name = nullptr; param_value = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_PARAMETER_OF_INST(inst, mapIter, param_name, param_value) param_name = nullptr; param_value = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_PORTREF_OF_INST(inst, mapIter, portRef) portRef = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_ARRAY_ITEM(array, i, item) item = nullptr; for(int iii=0;iii<2;++iii)
-#define FOREACH_MAP_ITEM(map, i, key, value) *key = nullptr; *value=nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_MAP_ITEM(map, i, key, value) *key = nullptr; *value = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_SET_ITEM(set, i, item) for(int iii=0;iii<2;++iii)
 #define FOREACH_PORT_OF_PORTBUS(portbus, setIter, port) port = nullptr; for(int iii=0;iii<2;++iii)
 #define FOREACH_NET_OF_NETBUS(netbus, mapIter, net) net = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_LIBRARY_OF_LIBSET(libset, mapIter, lib) lib = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_CELL_OF_LIBRARY(lib, mapIter, cell) cell = nullptr; for(int iii=0;iii<2;++iii)
+#define FOREACH_NETLIST_OF_CELL(cell, mapIter, nl) nl = nullptr; for(int iii=0;iii<2;++iii)
 
 #pragma GCC diagnostic pop
 

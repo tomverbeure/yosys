@@ -27,6 +27,8 @@ namespace veri_file {
     void AddYDir(const char *) { };
     bool AnalyzeMultipleFiles(Verific::Array *, int, const char *, int) { return false; };
     Verific::VeriModule * GetModule(const char *) { return nullptr; };
+    static void PrettyPrint(const char *, const char *, const char *) { };
+    static void ElaborateAll(const char *) { };
 
 }
 
